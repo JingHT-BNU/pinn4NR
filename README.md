@@ -12,8 +12,9 @@ masses, positions, momenta and spins.
 - **Network**: FiLM-conditioned MLP (6×256, ~726K parameters); parameters are
   sinusoidally encoded and modulate hidden layers;
 - **Ansatz & supervision**: same guided hard-constraint framework as the
-  single-parameter study (`u = κ·u_g·(1 + c·w·tanh(h_θ))`), with
-  reference-solution supervision + PDE regularization + curriculum learning;
+  single-parameter study,
+  $u = \kappa\,u_g\,(1 + c\,w\,\tanh h_\theta)$, with reference-solution
+  supervision + PDE regularization + curriculum learning;
 - κ precomputed for all LHS configurations (`multi_param_precompute.py`).
 
 ## Status
