@@ -1,76 +1,51 @@
-# A2-opv2 — Shape-Correcting Operator with Functional Inputs
+# A2-parametric-legacy — First Parametric Study (q ∈ [0.5, 2])
 
-Companion code for the **operator v2 variant** of our parametric PINN for
-binary black hole (BBH) initial data (paper: arXiv:2607.06002v1): a
-correction field that reads **true functional inputs** — samples of the
-guide solution in a neighborhood of each query point.
+**Legacy branch**, preserved for historical reference. This was our first
+extension of the single-configuration PINN (paper: arXiv:2607.06002v1) to a
+parametric model: one network covering mass ratios q ∈ [0.5, 2]. It was
+superseded by the redesigned study in the [`A2-base`](../../tree/A2-base) and
+subsequent branches.
 
 ## Method
 
-The v1 operator ([`A2-operator`](../../tree/A2-operator)) reads only per-point
-features and degenerates to a constant rescaling. v2 gives each query point a
-**local patch** of the guide solution:
+- **Network**: FiLM-conditioned MLP (4×128, ~112K parameters); the mass
+  parameter is sinusoidally encoded and modulates hidden layers;
+- **Ansatz**: `u = κ·u_g·(1 + c·w·tanh(h_θ(x, p)))` with a **global** min-max
+  window (all configurations share one normalization);
+- **Supervision**: reference-solution supervision + PDE regularization +
+  curriculum learning;
+- κ precomputed for 19 mass configurations (`precompute_kappa.py` →
+  `kappa_cache.json`).
 
-    u = κ·u_g·(1 + w·G_θ(x, p, f_patch)),   G_θ ∈ [-3, 3]
+## Results and lessons (why it was redesigned)
 
-    f_patch = { log1p(|u_g(x + r_i·d_j)| / σ_g) }   for i = 1..3 radii
-                                                      (0.5, 1.5, 4.0),
-                                                      j = 1..8 Fibonacci
-                                                      directions → 24 features
+1. Interpolation near q = 1 worked, but **light configurations had ~50×
+   worse residuals**: the global min-max window compresses the correction of
+   light configurations to ~1% (guide-solution peaks scale as m², a 16× range
+   across configurations). → the redesigned study uses **per-configuration
+   window normalization**;
+2. Extrapolation outside the training interval failed outright
+   (generalization study); the new study trains on q ∈ [1,10] where physical
+   interest lies (q and 1/q are mirror-equivalent configurations);
+3. Sinusoidal encoding of raw m2 aliases badly at m2 → 5 (frequency e⁷).
+   → the redesigned study encodes `[log10(q), m2/5]`.
 
-The radii span three shape scales of the guide field (inside the peaks, the
-inter-peak valley, the global envelope). The correction field can now
-represent *shape* modifications that follow the local geometry of the guide
-solution, shared across all 15 training configurations. Patch features are
-precomputed once per fixed point set and indexed per step (8 ms overhead).
+These three lessons directly shaped the `A2-base` branch design.
 
-Training recipe: identical to [`A2-champion`](../../tree/A2-champion)
-(corrected κ + all-configuration reference supervision + parameter noise) —
-a clean ablation against champion.
-
-## Results (15000 steps, 81³ grid, L=48 spectral reference)
-
-| q | 1.0 | 1.5 (held-out) | 2.0 | 5.0 (held-out) | 10 |
-|---|-----|-----|-----|-----|-----|
-| opv2 | 2.63e-2 | 2.90e-2 | 3.21e-2 | 3.35e-2 | 3.10e-2 |
-| champion | 2.65e-2 | 3.03e-2 | 3.20e-2 | 3.35e-2 | 2.87e-2 |
-
-Both success criteria evaluated, both **negative**:
-
-1. L2RE statistically identical to champion — the 3e-2 plateau stands;
-2. The structure probe (`a2q_opv2_probe.py`) shows ψ = corr_eff still
-   collapses to a **constant** (all percentiles = 0.133, relative IQR = 0,
-   geometry correlation ≈ 0) — even with full neighborhood information, the
-   training signal rewards only a constant rescaling.
-
-**Conclusion**: the bottleneck is neither network capacity nor input
-information — it is the loss structure. This completes the evidence chain
-that led to the supervision redesign of
-[`A2-champion2`](../../tree/A2-champion2) (−24% without any ansatz change)
-and identifies the far-field guide-shape error as the remaining frontier
-(requiring a free-field correction `u = κ·u_g + Δ_θ`).
-
-## Repository layout
+## Files
 
 ```
-a2q_model.py     # OperatorV2Ansatz (this variant), patch_offsets/fibonacci_dirs
-a2q_train.py     # unified trainer; run with --variant opv2
-a2q_opv2_probe.py # correction-field structure probe (percentiles/IQR/correlations)
-a2q_opv2_smoke.py # patch-feature timing + numerical health check
-a2q_eval.py      # 81³ L2RE evaluation + axis-profile figures
-a2q_runner.cmd   # crash-restart wrapper with checkpoint resumption
+parametric_model.py    # FiLM-conditioned MLP ansatz
+parametric_train.py    # training: reference supervision + curriculum
+parametric_eval.py     # L2RE (dual metrics) + physical validation
+parametric_viz.py      # per-parameter-axis profiles / loss curves
+precompute_kappa.py    # κ lookup-table precomputation
 ```
 
 ## Running
 
 ```cmd
-:: data pipeline (see A2-base branch README)
-python a2q_prep.py && python a2q_prep2.py && python a2q_refsub.py && python a2q_kappa2.py
-
-:: train (15000 steps, ~135 min on a 16 GB GPU)
-cmd /c a2q_runner.cmd opv2 a2q_opv2 15000
-
-:: evaluate + structure probe
-python a2q_eval.py --run runs\a2q_opv2 --grid-n 81
-python a2q_opv2_probe.py a2q_opv2 a2q_champion
+python precompute_kappa.py
+python parametric_train.py --steps 15000
+python parametric_eval.py --run runs\parametric_a1
 ```
