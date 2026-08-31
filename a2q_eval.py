@@ -22,10 +22,32 @@ REFS = os.path.join(ROOT, "paper", "tools", "refs_a2")
 sys.path.insert(0, os.path.join(ROOT, "paper", "tools"))
 from spectral_reference import SpectralPunctureSolver  # noqa: E402
 
-AXIS_RMIN = 0.15
-RCUT = 0.3          # 奇点邻域排除(A1 reference rcut=0.3 口径; 引导解精确命中会爆炸)
+AXIS_RMIN = 0.05    # 奇点邻域掩膜半径(u 在 puncture 处正则,收窄掩膜以减小峰顶截断)
+RCUT = 0.3          # 评估指标用的奇点邻域排除(A1 reference rcut=0.3 口径)
 GRID_N = 81
 R_MAX = 30.0
+
+
+def _bridge(ax_x, ax_u):
+    """用缺口两端各 12 个点的三次样条,桥接奇点邻域掩膜造成的曲线断口,
+    使 x 轴剖面图在尖峰处平滑连续(掩膜本身只保留 ±AXIS_RMIN 的窄缝)。"""
+    from scipy.interpolate import CubicSpline
+    u = np.asarray(ax_u, dtype=float).copy()
+    u[~np.isfinite(u)] = np.nan
+    for xp in (3.0, -3.0):
+        lo = np.searchsorted(ax_x, xp - AXIS_RMIN)
+        hi = np.searchsorted(ax_x, xp + AXIS_RMIN)
+        if lo == 0 or hi >= len(ax_x) or hi <= lo:
+            continue
+        left = max(lo - 12, 0)
+        right = min(hi + 12, len(ax_x))
+        xs = np.concatenate([ax_x[left:lo], ax_x[hi:right]])
+        us = np.concatenate([u[left:lo], u[hi:right]])
+        m = np.isfinite(us)
+        if m.sum() < 4:
+            continue
+        u[lo:hi] = CubicSpline(xs[m], us[m])(ax_x[lo:hi])
+    return u
 
 
 def l2re(a, b):
@@ -126,22 +148,19 @@ def main():
 
         if figs_ok:
             ax = axes[i // ncol][i % ncol]
-            keep = np.ones(len(xs_d), dtype=bool)
-            for xp in (3.0, -3.0):
-                keep &= np.abs(xs_d - xp) > AXIS_RMIN
             um = predict_a2q(model, axis_pts, cinfo, device).astype(float)
-            um[~keep] = np.nan
+            um = _bridge(xs_d, um)
             ma = torch.tensor([0.5, m["m2"]], dtype=torch.float64)
             xst = torch.tensor([[3.0, 0, 0], [-3.0, 0, 0]], dtype=torch.float64)
             Pt = torch.tensor([[0.0, 0.2, 0.0], [0.0, -0.2, 0.0]], dtype=torch.float64)
             St = torch.zeros((2, 3), dtype=torch.float64)
             xt = torch.from_numpy(axis_pts).double()
             ug = (float(m["kappa"]) * physics.guide_u(xt, ma, xst, Pt, St)).numpy()
-            ug = np.where(keep, ug, np.nan)
+            ug = _bridge(xs_d, ug)
             ax.plot(xs_d, um, "-", lw=0.9, color="C0", label="模型 u_θ")
             ax.plot(xs_d, ug, "--", lw=0.6, color="C2", label="引导基线 κ·u_g")
             if ref_axis is not None:
-                ur = np.where(keep, ref_axis, np.nan)
+                ur = _bridge(xs_d, ref_axis)
                 ax.plot(xs_d, ur, "-", lw=0.9, color="C3", alpha=0.9,
                         label="谱方法参考解")
             tag = " | 零样本" if lb in heldout else ""
