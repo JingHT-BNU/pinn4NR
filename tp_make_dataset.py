@@ -153,7 +153,8 @@ def main():
     ap.add_argument("--labels", default=None,
                     help="逗号分隔 q 值;缺省全部 Q_LIST")
     ap.add_argument("--nprocs", type=int, default=4)
-    ap.add_argument("--npoints", type=int, default=60)
+    ap.add_argument("--npoints", type=int, default=48,
+                    help="TP 谱分辨率(NZLC q=100 官方 par 用 48;n48 比 n60 快 ~2×)")
     args = ap.parse_args()
     qs = [float(x) for x in args.labels.split(",")] if args.labels else Q_LIST
     os.makedirs(WIN_WORK, exist_ok=True)

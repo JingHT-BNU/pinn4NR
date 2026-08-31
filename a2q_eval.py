@@ -17,9 +17,14 @@ import physics
 from a2q_model import load_run, predict_a2q
 
 log = logging.getLogger("paper.A2.a2q_eval")
-ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-REFS = os.path.join(ROOT, "paper", "tools", "refs_a2")
-sys.path.insert(0, os.path.join(ROOT, "paper", "tools"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+# 仓库化布局:参考解在 data/refs/a2,谱求解器在 tools/
+REFS = os.path.join(HERE, "data", "refs", "a2")
+_TOOLS = os.path.join(HERE, "tools")
+if not os.path.isdir(_TOOLS):
+    _TOOLS = os.path.join(os.path.dirname(HERE), "paper", "tools")
+    REFS = os.path.join(_TOOLS, "refs_a2")
+sys.path.insert(0, _TOOLS)
 from spectral_reference import SpectralPunctureSolver  # noqa: E402
 
 AXIS_RMIN = 0.05    # 奇点邻域掩膜半径(u 在 puncture 处正则,收窄掩膜以减小峰顶截断)
