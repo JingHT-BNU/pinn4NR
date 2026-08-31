@@ -41,7 +41,11 @@ from a2q_model import make_model, param_vec
 log = logging.getLogger("paper.A2.a2q_train")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-RUNS = os.path.join(HERE, "runs")
+RUNS = os.path.join(HERE, "data", "runs", "a2")
+# 仓库化后的数据目录(本地大文件,gitignore):优先 repo 根 data/datasets/a2q_data
+_DATA_NEW = os.path.join(HERE, "data", "datasets", "a2q_data")
+if os.path.isdir(_DATA_NEW):
+    DATA_DIR = _DATA_NEW
 TRAIN_LABELS = [lb for _, lb in Q_TRAIN]
 W2, W_ROB, W_SING = 1.0, 1.0, 100.0
 
@@ -153,6 +157,15 @@ class Trainer:
         self.model.load_state_dict(ck["model"])
         self.opt.load_state_dict(ck["opt"])
         self.sch.load_state_dict(ck["sch"])
+        # 续训时 step() 会 model.double();优化器状态在 load 时被转为 load 时
+        # 参数的 float32 → 与 double 参数/梯度 dtype 不匹配。统一转 double。
+        self.model.double()
+        for g in self.opt.param_groups:
+            for p in g["params"]:
+                st = self.opt.state.get(p, {})
+                for kk, v in st.items():
+                    if torch.is_tensor(v):
+                        st[kk] = v.to(p.dtype)
         self.ema = ck["ema"]; self.hist = ck["hist"]
         self.ref_w = ck.get("ref_w", self.ref_w)
         self.ema_ref = ck.get("ema_ref", self.ema_ref)
