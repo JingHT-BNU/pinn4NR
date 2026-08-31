@@ -1,51 +1,62 @@
-# A2-parametric-legacy — First Parametric Study (q ∈ [0.5, 2])
+# A3 — Multi-Parametric PINN for Binary Black Hole Initial Data
 
-**Legacy branch**, preserved for historical reference. This was our first
-extension of the single-configuration PINN (paper: arXiv:2607.06002v1) to a
-parametric model: one network covering mass ratios q ∈ [0.5, 2]. It was
-superseded by the redesigned study in the [`A2-base`](../../tree/A2-base) and
-subsequent branches.
+Companion code for the **multi-parametric** stage of our study on BBH initial
+data via physics-informed neural networks (paper: arXiv:2607.06002v1): one
+network covering an **8-dimensional configuration space** — two puncture
+masses, positions, momenta and spins.
 
 ## Method
 
-- **Network**: FiLM-conditioned MLP (4×128, ~112K parameters); the mass
-  parameter is sinusoidally encoded and modulates hidden layers;
-- **Ansatz**: `u = κ·u_g·(1 + c·w·tanh(h_θ(x, p)))` with a **global** min-max
-  window (all configurations share one normalization);
-- **Supervision**: reference-solution supervision + PDE regularization +
-  curriculum learning;
-- κ precomputed for 19 mass configurations (`precompute_kappa.py` →
-  `kappa_cache.json`).
+- **Configuration sampling**: Latin Hypercube Sampling over the 8-D box
+  (400 configurations: 300 training + 100 validation);
+- **Network**: FiLM-conditioned MLP (6×256, ~726K parameters); parameters are
+  sinusoidally encoded and modulate hidden layers;
+- **Ansatz & supervision**: same guided hard-constraint framework as the
+  single-parameter study (`u = κ·u_g·(1 + c·w·tanh(h_θ))`), with
+  reference-solution supervision + PDE regularization + curriculum learning;
+- κ precomputed for all LHS configurations (`multi_param_precompute.py`).
 
-## Results and lessons (why it was redesigned)
+## Status
 
-1. Interpolation near q = 1 worked, but **light configurations had ~50×
-   worse residuals**: the global min-max window compresses the correction of
-   light configurations to ~1% (guide-solution peaks scale as m², a 16× range
-   across configurations). → the redesigned study uses **per-configuration
-   window normalization**;
-2. Extrapolation outside the training interval failed outright
-   (generalization study); the new study trains on q ∈ [1,10] where physical
-   interest lies (q and 1/q are mirror-equivalent configurations);
-3. Sinusoidal encoding of raw m2 aliases badly at m2 → 5 (frequency e⁷).
-   → the redesigned study encodes `[log10(q), m2/5]`.
+Training variant **v5** reaches **L2RE ≈ 0.52%** on the base configuration
+(our full-reference metric). Earlier variants (v1–v4) and their component-level
+diagnoses are documented in `multi_param_experiments.md` (see also
+`README_legacy.md` for the original run instructions).
 
-These three lessons directly shaped the `A2-base` branch design.
+## Carrying over the single-parameter lessons
+
+The single-parameter study (branches `A2-base` … `A2-champion2`) established
+several methodological facts that directly apply here:
+
+1. **κ caches are noise-sensitive**: per-configuration random seeds + 200k
+   QMC points make κ(q) jump by up to ±21%, coinciding with model failure
+   regions. Use a fixed seed with ~2M points (see `A2-base`:
+   `a2q_kappa2.py`); the bundled `multi_param_kappa_cache.json` predates
+   this fix;
+2. **Per-configuration window normalization** (not global min-max);
+3. **All-configuration reference supervision at every step** — sampling a few
+   configurations per step lets the PDE batch-mean gradient drown the
+   reference signal (see `A2-champion2` for the decisive experiment);
+4. **Well-scaled parameter encoding** (`log10`-style), not raw-value
+   sinusoidal encoding;
+5. Far-field guide-shape error is the remaining frontier for sub-2% targets.
 
 ## Files
 
 ```
-parametric_model.py    # FiLM-conditioned MLP ansatz
-parametric_train.py    # training: reference supervision + curriculum
-parametric_eval.py     # L2RE (dual metrics) + physical validation
-parametric_viz.py      # per-parameter-axis profiles / loss curves
-precompute_kappa.py    # κ lookup-table precomputation
+multi_param_model.py       # 8-D FiLM-conditioned MLP
+multi_param_train.py       # training loop (variants v1–v5)
+multi_param_eval.py        # evaluation + parameter sensitivity
+multi_param_viz.py         # visualization
+multi_param_precompute.py  # κ precomputation (LHS 400 configurations)
+multi_param_experiments.md # experiment log (v1–v5 diagnoses)
+README_legacy.md           # original run instructions
 ```
 
 ## Running
 
 ```cmd
-python precompute_kappa.py
-python parametric_train.py --steps 15000
-python parametric_eval.py --run runs\parametric_a1
+python multi_param_precompute.py
+python multi_param_train.py --steps 15000
+python multi_param_eval.py --run runs\multi_param_v5
 ```
