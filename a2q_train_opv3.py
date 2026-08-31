@@ -68,6 +68,21 @@ def main():
         cfgs[lb] = d
         zr = np.load(os.path.join(DATA_DIR, f"refsub_{lb}.npz"))
         refs[lb] = dict(x=zr["x"], u=zr["u"])
+    # ---- 扩展:tq 配置(opv3 大数据集,q∈[1,100] 补密,κ*_spec 在 cfg 内) ----
+    import glob
+    tq = sorted(glob.glob(os.path.join(DATA_DIR, "cfg_tq*.npz")))
+    for p in tq:
+        lb = os.path.basename(p)[4:-4]
+        z = np.load(p)
+        cfgs[lb] = {k: z[k] for k in z.files}
+        rp = os.path.join(DATA_DIR, f"refsub_{lb}.npz")
+        if not os.path.exists(rp):
+            log.error(f"cfg_{lb} 存在但 refsub_{lb} 缺失,先运行 post_refs_opv3.py")
+            raise SystemExit(2)
+        zr = np.load(rp)
+        refs[lb] = dict(x=zr["x"], u=zr["u"])
+    if tq:
+        log.info(f"扩展数据集: +{len(tq)} 个 tq 配置(共 {len(cfgs)} 配置)")
     # κ*(q) 曲线(留出插值)
     q_arr = np.array([float(cfgs[lb]["q"]) for lb in TRAIN_LABELS])
     k_arr = np.array([float(cfgs[lb]["kappa"]) for lb in TRAIN_LABELS])
