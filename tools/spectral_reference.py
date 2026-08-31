@@ -52,7 +52,15 @@ from logutil import setup_logging  # noqa: E402
 log = logging.getLogger("paper.tools.spectral_reference")
 
 import physics  # noqa: E402
-from multi_param_model import build_bbh_from_params  # noqa: E402
+try:
+    from multi_param_model import build_bbh_from_params  # noqa: E402
+except ImportError:  # 仓库化分支无 A3 代码时内联等价实现(约定一致)
+    def build_bbh_from_params(raw):
+        m_p, m_m, x_p, x_m, P_py, P_my, S_pz, S_mz = raw
+        return (np.array([m_p, m_m]),
+                np.array([[x_p, 0.0, 0.0], [x_m, 0.0, 0.0]]),
+                np.array([[0.0, P_py, 0.0], [0.0, P_my, 0.0]]),
+                np.array([[0.0, 0.0, S_pz], [0.0, 0.0, S_mz]]))
 
 
 # ── 球谐(Y_lm 自实现, 含 Condon-Shortley 相位) ────────────────
