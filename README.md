@@ -10,8 +10,8 @@ subsequent branches.
 
 - **Network**: FiLM-conditioned MLP (4×128, ~112K parameters); the mass
   parameter is sinusoidally encoded and modulates hidden layers;
-- **Ansatz**: `u = κ·u_g·(1 + c·w·tanh(h_θ(x, p)))` with a **global** min-max
-  window (all configurations share one normalization);
+- **Ansatz**: $u = \kappa\,u_g\,(1 + c\,w\,\tanh h_\theta(x, p))$ with a
+  **global** min-max window (all configurations share one normalization);
 - **Supervision**: reference-solution supervision + PDE regularization +
   curriculum learning;
 - κ precomputed for 19 mass configurations (`precompute_kappa.py` →
@@ -19,16 +19,17 @@ subsequent branches.
 
 ## Results and lessons (why it was redesigned)
 
-1. Interpolation near q = 1 worked, but **light configurations had ~50×
+1. Interpolation near $q = 1$ worked, but **light configurations had ~50×
    worse residuals**: the global min-max window compresses the correction of
-   light configurations to ~1% (guide-solution peaks scale as m², a 16× range
-   across configurations). → the redesigned study uses **per-configuration
-   window normalization**;
+   light configurations to ~1% (guide-solution peaks scale as $m^2$, a 16×
+   range across configurations). → the redesigned study uses
+   **per-configuration window normalization**;
 2. Extrapolation outside the training interval failed outright
-   (generalization study); the new study trains on q ∈ [1,10] where physical
-   interest lies (q and 1/q are mirror-equivalent configurations);
-3. Sinusoidal encoding of raw m2 aliases badly at m2 → 5 (frequency e⁷).
-   → the redesigned study encodes `[log10(q), m2/5]`.
+   (generalization study); the new study trains on $q \in [1,10]$ where
+   physical interest lies ($q$ and $1/q$ are mirror-equivalent
+   configurations);
+3. Sinusoidal encoding of raw $m_2$ aliases badly at $m_2 \to 5$ (frequency
+   $e^7$). → the redesigned study encodes $[\log_{10} q,\ m_2/5]$.
 
 These three lessons directly shaped the `A2-base` branch design.
 
