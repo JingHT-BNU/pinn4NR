@@ -13,15 +13,17 @@ Trains a physics-informed neural network for **one BBH configuration at a
 time** (four test cases: `base`, `a1`, `b2`, `b4`), implementing every core
 technique of the paper:
 
-- **Guided hard-constraint ansatz** (Eq. 5): `u = κ·u_g·(1 + φ_θ)` with the
-  analytic Lousto–Zlochower guide solution `u_g` (Eq. 6) built in — boundary
-  and asymptotic conditions are satisfied exactly, the network only learns
-  the correction `φ_θ = c·w·tanh(h_θ)`;
+- **Guided hard-constraint ansatz** (Eq. 5):
+  $u = \kappa\,u_g\,(1 + \phi_\theta)$ with the analytic Lousto–Zlochower
+  guide solution $u_g$ (Eq. 6) built in — boundary and asymptotic conditions
+  are satisfied exactly, the network only learns the correction
+  $\phi_\theta = c\,w\,\tanh(h_\theta)$;
 - **κ energy calibration** (Eqs. 9–10), **window function** (Eq. 7),
   **Robin exterior boundary** (Eq. 8);
 - **Composite loss** (Eqs. 11–15) with **EMA loss balancing** (Eqs. 16–17);
-- Puncture singularity split `ψ = (1 + Σₖ mₖ/2rₖ)/α + u` (Eq. 3) and
-  Bowen–York extrinsic curvature (Eq. 2).
+- Puncture singularity split
+  $\psi = \big(1 + \sum_k m_k/2r_k\big)/\alpha + u$ (Eq. 3) and Bowen–York
+  extrinsic curvature (Eq. 2).
 
 ## Results
 
