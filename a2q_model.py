@@ -204,12 +204,106 @@ class OperatorV2Ansatz(nn.Module):
         return kappa * ug * (1.0 + phi), phi, psi
 
 
+class OperatorV3Ansatz(nn.Module):
+    """A2-1 v3:DeepONet 式 branch-trunk 自由场修正算子(设计文档 §2)。
+
+    u = κ·u_g + Δ_θ,  Δ_θ = Σ_k b_k(u_g; p) · t_k(x) · χ(x)
+      - branch:输入 = 引导场在全局传感器点集(半径×Fibonacci 方向)上的
+        log1p(|u_g|/sq) 采样 + 参数编码 [log10 q, m2/5],输出 p 个系数;
+      - trunk:坐标正弦编码 → p 个基函数;
+      - χ:奇点抑制窗 ∏_k (1−exp(−r_k²/rc²)),r_c=0.3;
+      - branch 末层零初始化 → 从 κ·u_g 出发;Δ 为加性自由场,远场不失杠杆
+        (针对 champion2 诊断的第③层误差:远场引导解形状误差)。
+    """
+
+    def __init__(self, hidden_layers=4, hidden_neurons=128, n_freq=8,
+                 n_basis=128, radii=(0.5, 1.5, 4.0), n_dirs=8, rc=0.3):
+        super().__init__()
+        offs = patch_offsets(radii, n_dirs)
+        self.register_buffer("patch_off", torch.tensor(offs, dtype=torch.float64),
+                             persistent=False)
+        self.n_freq = n_freq
+        self.rc = float(rc)
+        H = hidden_neurons
+        # branch:传感器特征 (n_off) + 参数 2 → 系数 n_basis
+        self.branch = nn.Sequential(nn.Linear(offs.shape[0] + 2, H), nn.SiLU())
+        for _ in range(hidden_layers - 1):
+            self.branch.append(nn.Linear(H, H))
+            self.branch.append(nn.SiLU())
+        self.branch.append(nn.Linear(H, n_basis))
+        # trunk:坐标编码(3 + 3*2*n_freq)→ n_basis
+        coord_dim = 3 + 3 * 2 * n_freq
+        self.trunk = nn.Sequential(nn.Linear(coord_dim, H), nn.SiLU())
+        for _ in range(hidden_layers - 1):
+            self.trunk.append(nn.Linear(H, H))
+            self.trunk.append(nn.SiLU())
+        self.trunk.append(nn.Linear(H, n_basis))
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.zeros_(m.bias)
+        nn.init.zeros_(self.branch[-1].weight)
+        nn.init.zeros_(self.branch[-1].bias)
+
+    def _embed_x(self, x):
+        emb = [x]
+        for i in range(self.n_freq):
+            f = float(np.exp(i))
+            emb.append(torch.sin(x * f))
+            emb.append(torch.cos(x * f))
+        return torch.cat(emb, dim=-1)
+
+    def sensor_feats(self, x, masses, xs, Ps, Ss, sq):
+        """全局传感器:在固定偏移点采样引导场(共享同一批查询点邻域——
+        实际用查询点邻域 patch 作为传感器读数,保持真泛函输入)。"""
+        pts = (x.unsqueeze(1) + self.patch_off.to(x.dtype)).reshape(-1, 3)
+        pug = physics.guide_u(pts, masses, xs, Ps, Ss).reshape(x.shape[0], -1)
+        return torch.log1p(pug.abs() / sq)
+
+    def forward(self, x, masses, xs, Ps, Ss, params, kappa, wmin, wmax, sq):
+        ug = physics.guide_u(x, masses, xs, Ps, Ss).to(x.dtype)
+        return kappa * ug + self.delta(x, masses, xs, Ps, Ss, params,
+                                       kappa, ug, sq)
+
+    def delta(self, x, masses, xs, Ps, Ss, params, kappa, ug, sq, feats=None):
+        if feats is None:
+            feats = self.sensor_feats(x, masses, xs, Ps, Ss, sq).to(ug.dtype)
+        pin = params.to(x.dtype)
+        if pin.shape[0] == 1 and x.shape[0] > 1:
+            pin = pin.expand(x.shape[0], -1)
+        b = self.branch(torch.cat([feats, pin], dim=-1))
+        t = self.trunk(self._embed_x(x))
+        d = (b * t).sum(-1, keepdim=False)
+        r1 = (x - xs[0]).norm(dim=1)
+        r2 = (x - xs[1]).norm(dim=1)
+        chi = (1.0 - torch.exp(-r1 ** 2 / self.rc ** 2)) * \
+              (1.0 - torch.exp(-r2 ** 2 / self.rc ** 2))
+        return d * chi
+
+    def forward_from_parts(self, x, params, kappa, ug, w, sq=None, feats=None):
+        """快路径:ug/w 预计算。返回 (u, phi, psi),phi=Δ/(κ·u_g) 仅诊断用,
+        psi=Δ。反传只经 branch/trunk。"""
+        if feats is None:
+            raise ValueError("opv3 的 forward_from_parts 需要预计算 patch feats")
+        masses = None
+        # 快路径无法访问 masses/xs → 由调用方在 feats 中给全;delta 需 xs 求 chi,
+        # 这里以 x 直接近似:chi 由预计算 feats 之外的 cinfo 提供——简化为
+        # 调用方通过 w 不再依赖。opv3 训练脚本统一走 forward()。
+        raise NotImplementedError("opv3 训练请使用 forward 路径(见 a2q_train opv3)")
+
+
+def fibonacci_dirs_v3(n):
+    return fibonacci_dirs(n)
+
+
 def make_model(variant, device):
     # champion 用基线 ansatz(容量已证够用,瓶颈在监督稀释与 κ,见报告 §5.3/5.4)
     if variant == "operator":
         model = OperatorAnsatz()
     elif variant == "opv2":
         model = OperatorV2Ansatz()
+    elif variant == "opv3":
+        model = OperatorV3Ansatz()
     else:
         model = BaselineAnsatz()
     return model.to(device)
