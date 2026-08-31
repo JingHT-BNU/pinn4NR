@@ -1,4 +1,5 @@
-# ---- 数据与产物(不上传 GitHub)----
+# ---- 数据与产物(不上传 GitHub;统一放在 data/,本地保留避免重跑)----
+data/
 # 谱方法参考解(GB 级):由 tools/spectral_reference.py / make_refs_*.py 重新生成
 tools/refs/
 tools/refs_a2/
