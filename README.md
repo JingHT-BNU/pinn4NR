@@ -1,4 +1,4 @@
-# pinn4NR â€?Physics-Informed Neural Networks for Binary Black Hole Initial Data
+# pinn4NR Physics-Informed Neural Networks for Binary Black Hole Initial Data
 
 Companion repository for our research on solving the Hamiltonian constraint
 (Lichnerowicz equation) of binary black hole (BBH) initial data with
