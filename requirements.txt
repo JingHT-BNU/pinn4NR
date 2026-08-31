@@ -1,0 +1,8 @@
+# 复现 arXiv:2607.06002v1 的 PINN 依赖
+# 本机(Windows/CPU)验证: torch 用 CPU 版
+# 服务器(GPU): 安装 CUDA 版 torch(见 README)
+
+numpy>=1.26
+scipy>=1.11
+matplotlib>=3.8
+torch>=2.1

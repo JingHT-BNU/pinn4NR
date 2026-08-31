@@ -1,0 +1,31 @@
+# ---- 数据与产物(不上传 GitHub)----
+# 谱方法参考解(GB 级):由 tools/spectral_reference.py / make_refs_*.py 重新生成
+tools/refs/
+tools/refs_a2/
+tools/tp_work/
+tools/*.npz
+# 训练产物与检查点:由 a2q_runner.cmd / 各 train 脚本重新生成
+**/runs/
+# 预计算数据(cfg npz / refsub):由 a2q_prep*.py / a2q_refsub.py 重新生成
+**/a2q_data/
+# 日志
+**/logs/
+paper/logs/
+
+# ---- Python ----
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.idea/
+
+# ---- 大文件与论文原件 ----
+*.pdf
+*.npz
+*.npy
+*.pt
+*.ckpt
+
+# ---- 系统 ----
+Thumbs.db
+.DS_Store
