@@ -1,72 +1,68 @@
-# A2-operator — Neural-Operator Correction Field for Parametric BBH Initial Data
+# A2-champion — Combined Recipe for Parametric BBH Initial Data
 
-Companion code for the **neural-operator variant** of our parametric PINN for
-binary black hole (BBH) initial data. Extends the guided hard-constraint
-ansatz of the paper (arXiv:2607.06002v1) with a **conditional operator
-network** that reads guide-solution features.
+Companion code for the **champion variant** of our parametric PINN for binary
+black hole (BBH) initial data: the best-performing combination of supervision
+and training-schedule improvements identified across the A2 study, applied to
+the baseline guided ansatz (paper: arXiv:2607.06002v1).
 
 ## Method
 
-The baseline parametric ansatz uses a scalar-scaled correction
+Baseline ansatz (unchanged — the operator study showed network capacity is
+not the bottleneck):
 
     u = κ·u_g·(1 + c·w·tanh(h_θ(x, p)))
 
-This variant replaces the scalar scale with a **bounded operator field**:
+Champion recipe on top of it:
 
-    u = κ·u_g·(1 + w·G_θ(x, p, f)),   G_θ ∈ [-3, 3]
+1. **Corrected κ**: the cached κ values used by earlier variants suffered from
+   QMC sampling noise (up to ±21% jumps, coinciding exactly with model failure
+   regions). We re-solve κ with a fixed seed and 2M volume points
+   (`a2q_kappa2.py`) — the resulting κ(q) is smooth and monotone;
+2. **All-configuration reference supervision** with 3× weight and a floor on
+   the reference-loss coefficient (counteracts batch-mean dilution);
+3. **Progressive parameter noise**: q̃ = q·exp(σ_t·ξ), σ_t ramped 0→0.06 over
+   the first half of training; the guide field and κ are recomputed online;
+4. 15,000 steps (vs. 10,000 for the single-variant studies).
 
-where `G_θ` is a FiLM-conditioned MLP that additionally reads per-point
-guide-solution features `f = [log1p(|u_g|/σ_g), w]`, with a zero-initialized
-final layer (training starts exactly from the guide solution).
+Configuration space: mass ratio q ∈ [1,10], 15 training + 3 held-out
+configurations.
 
-Training configuration: mass ratio q ∈ [1,10] (18 configurations, geometric
-spacing, 3 held out), guide solution and its derivatives precomputed (fast
-residual path — autograd only through the MLP), all configurations share one
-network.
-
-## Result (and a useful negative finding)
-
-Evaluated on an 81³ grid vs. an L=48 spectral reference (r > 0.3):
+## Results (81³ grid, L=48 spectral reference, r > 0.3)
 
 | q | 1.0 | 1.5 (held-out) | 2.0 | 5.0 (held-out) | 10 |
 |---|-----|-----|-----|-----|-----|
-| L2RE | 5.9e-3 | 1.35e-1 | 2.1e-1 | 5.5e-2 | — |
+| champion | 2.65e-2 | 3.03e-2 | 3.20e-2 | 3.35e-2 | 2.87e-2 |
+| guide baseline | 3.48e-2 | 3.92e-2 | 4.13e-2 | 3.97e-2 | 3.16e-2 |
 
-The operator variant converges to **exactly the same solution as the scalar
-baseline** (per-configuration difference < 1%). A correction-field usage probe
-(`a2q_operator_probe.py`) shows why: |corr| sits at a constant ≈ 0.21 across
-all percentiles — the training signal (PDE batch mean + single-configuration
-reference) is satisfied by a trivial *constant rescaling* of the guide
-solution, so the network never uses its shape degrees of freedom.
+Global (train) mean 3.15e-2, max 3.50e-2 — a **uniform** error level: the
+catastrophic region of the baseline (q≈2: L2RE 0.21) is fully cured.
 
-**Takeaway**: the expressive power of the ansatz is not the bottleneck; the
-bottleneck lies in the loss structure and supervision placement. This
-motivated the supervision-side redesign in the
-[`A2-champion`](../../tree/A2-champion) and
-[`A2-champion2`](../../tree/A2-champion2) branches, which reduced the global
-error by 24% without changing the network.
+**Key diagnostic**: the reference loss stays flat for all 15,000 steps. This
+is *not* undertraining — see [`A2-champion2`](../../tree/A2-champion2) for
+the decisive experiment (pure-reference fine-tuning drives the same network
+2.4× lower) and the fix (all-configuration full-batch reference supervision,
+global mean 3.15e-2 → 2.40e-2).
 
 ## Repository layout
 
 ```
-a2q_model.py   # BaselineAnsatz / OperatorAnsatz (this variant) / OperatorV2Ansatz
-a2q_train.py   # unified trainer; run with --variant operator
-a2q_eval.py    # 81³ L2RE evaluation + per-parameter-axis profile figures
-a2q_operator_probe.py  # correction-field usage probe (the analysis above)
-a2q_prep.py, a2q_prep2.py, a2q_refsub.py, a2q_kappa2.py  # data pipeline
+a2q_train.py   # unified trainer; run with --variant champion
+a2q_model.py   # BaselineAnsatz (champion uses the baseline ansatz)
+a2q_kappa2.py  # fixed-seed high-density κ re-solve (the QMC-noise fix)
+a2q_eval.py    # 81³ L2RE evaluation + axis-profile figures
+a2q_region_diag.py  # near/mid/far-field error decomposition
 a2q_runner.cmd # crash-restart wrapper with checkpoint resumption
 ```
 
 ## Running
 
 ```cmd
-:: data pipeline (see A2-base branch README for full details)
+:: data pipeline (see A2-base branch README)
 python a2q_prep.py && python a2q_prep2.py && python a2q_refsub.py && python a2q_kappa2.py
 
-:: train (10000 steps, ~70 min on a 16 GB GPU)
-cmd /c a2q_runner.cmd operator a2q_operator 10000
+:: train (15000 steps, ~105 min on a 16 GB GPU)
+cmd /c a2q_runner.cmd champion a2q_champion 15000
 
-:: evaluate + probe
-python a2q_eval.py --run runs\a2q_operator --grid-n 81
-python a2q_operator_probe.py
+:: evaluate
+python a2q_eval.py --run runs\a2q_champion --grid-n 81
 ```
