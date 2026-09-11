@@ -448,8 +448,9 @@ def main():
     args.exp = resolve_input_path(args.exp)
     args.reference = resolve_input_path(args.reference)
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.device == "auto"
-                          else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"设备: {device}")
 
     model, ckpt, info = load_model(args.exp, device)

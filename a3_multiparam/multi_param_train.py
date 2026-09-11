@@ -630,8 +630,9 @@ def main():
             continue
         setattr(args, arg_name, resolve_input_path(val, paper_root))
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.device == "auto"
-                          else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"设备: {device}")
 
     # ── 加载 κ 缓存 ──

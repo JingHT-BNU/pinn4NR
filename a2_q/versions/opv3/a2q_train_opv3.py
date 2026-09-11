@@ -64,8 +64,9 @@ def main():
     ap.add_argument("--device", default="auto")
     ap.add_argument("--exp-name", default="a2q_opv3")
     args = ap.parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available()
-                          and args.device == "auto" else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"[{args.exp_name}] opv3 设备={device} 步数={args.steps}")
     rng = np.random.default_rng(args.seed)
 

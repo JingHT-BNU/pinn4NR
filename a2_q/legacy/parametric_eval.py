@@ -151,7 +151,9 @@ def main():
     parser.add_argument("--reference-uniform", default=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools", "reference_u_uniform101_rcut0.3.npz"))
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.device == "auto" else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"设备: {device}")
     log.info(f"加载模型: {args.model}")
     model = load_model(args.model, device)

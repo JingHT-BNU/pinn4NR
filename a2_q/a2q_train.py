@@ -513,8 +513,9 @@ def main():
     args = ap.parse_args()
     if args.exp_name is None:
         args.exp_name = f"a2q_{args.variant}"
-    device = torch.device("cuda" if torch.cuda.is_available() and args.device == "auto"
-                          else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info(f"[{args.exp_name}] 变体={args.variant} 设备={device} 步数={args.steps}")
     tr = Trainer(args, device)
     if not tr.try_resume():

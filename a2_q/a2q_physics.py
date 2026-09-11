@@ -291,8 +291,9 @@ def main():
     run_dir = args.run
     log_f = setup_logging("A2", "a2q_physics")
     log.info("run = %s", run_dir)
-    device = torch.device("cuda" if torch.cuda.is_available()
-                          and args.device == "auto" else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     log.info("device = %s", device)
 
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

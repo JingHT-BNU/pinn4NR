@@ -76,8 +76,9 @@ def main():
     ap.add_argument("--n-pts", type=int, default=400)
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available()
-                          and args.device == "auto" else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     run_dir = args.run if os.path.isabs(args.run) else os.path.join(RUNS, args.run)
     model, ck = A2.load_run(run_dir, device)
     meta = ck["meta"]

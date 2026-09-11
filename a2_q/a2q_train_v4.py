@@ -86,6 +86,16 @@ def main():
                     help="径向权重终点:r0>=此值时权重为 1")
     ap.add_argument("--pde-p", type=float, default=1.0,
                     help="径向权重指数:w=((r0-r_start)/(r_end-r_start))^p")
+    ap.add_argument("--pde-norm", choices=("batch", "rel"), default="batch",
+                    help="残差归一化方式。batch:全场单一标量 RMS_批次(S)"
+                         "(旧行为,已证实远场仅占 0.2%% 权重);"
+                         "rel:逐点 sqrt(S²+(eps·S_ref)²),使远场真正进入损失")
+    ap.add_argument("--pde-eps", type=float, default=0.05,
+                    help="[--pde-norm rel] 归一化下限,以该配置源项参考尺度 "
+                         "S_ref 为单位。越小则远场放大越大(上限≈1/eps²)")
+    ap.add_argument("--pde-cfgs", type=int, default=1,
+                    help="每步参与 PDE 残差的配置数(总点数仍为 --pde-n)"
+                         "。1=旧行为(每配置约 63 步才被监督一次)")
     ap.add_argument("--heldout", default="q15,q25,q50,q74,q86")
     ap.add_argument("--data-dir", default=DATA_DIR)
     ap.add_argument("--init-from", default=None,
@@ -95,8 +105,9 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available()
-                          and args.device == "auto" else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     heldout = set(args.heldout.split(",") if args.heldout else [])
     log.info("[%s] 设备=%s 步数=%d ppc=%d", args.exp_name, device, args.steps,
              args.pts_per_cfg)
@@ -145,7 +156,9 @@ def main():
          "sn": args.smooth_n,
          "pw": args.pde_w, "pn": args.pde_n, "prho": args.pde_rho_min,
          "prmax": args.pde_rmax, "prs": args.pde_r_start,
-         "pre": args.pde_r_end, "pp": args.pde_p},
+         "pre": args.pde_r_end, "pp": args.pde_p,
+         "pnorm": args.pde_norm, "peps": args.pde_eps,
+         "pcfg": args.pde_cfgs},
         sort_keys=True).encode()).hexdigest()
     ck_dir = os.path.join(RUNS, args.exp_name)
     os.makedirs(ck_dir, exist_ok=True)
@@ -227,6 +240,68 @@ def main():
     ST3 = torch.zeros((2, 3), dtype=torch.float64, device=device)
     XA3 = torch.tensor([3.0, 0.0, 0.0], dtype=torch.float64, device=device)
 
+    _PDE_EDGES_T = None                       # rel 模式下的壳层分箱边界
+    # --pde-norm rel 的确定性标定量(训练前算一次,不随训练漂移)。
+    #
+    # 为什么必须"确定性":
+    #   归一化尺度若参与梯度,它本身就变成一个可被优化的自由度,不再是尺度。
+    #   故一律用**与模型无关**的 ψ_sing(而非 ψ_sing+u)计算。
+    #
+    # 为什么必须"逐壳层"而非"逐点":
+    #   逐点 sig_j=S_j 会让单个 S_j→0 的点被放大到 1/eps²,产生 10³ 量级的
+    #   批间尖峰(实测 l_pde 在 7e4~6.7e7 之间跳动,12 步就把 L_ref 从
+    #   1.48e-5 打到 1.86e-5)。改用 r0 对数分箱内的 S_rms 后曲线光滑得多。
+    if args.pde_w > 0 and args.pde_norm == "rel":
+        t_ref = time.time()
+        _K = 12                                   # 壳层数
+        _edges = np.geomspace(max(args.pde_rho_min, 1e-3),
+                              args.pde_rmax, _K + 1)
+        _PDE_EDGES_T = torch.from_numpy(_edges).double().to(device)
+        with torch.no_grad():
+            for i_lb, lb in enumerate(all_labels):
+                tt = tens[lb]
+                _r = np.random.default_rng(args.seed + 100000 + i_lb)
+                _xs = torch.from_numpy(
+                    _r.uniform(-args.pde_rmax, args.pde_rmax,
+                               size=(max(4 * args.pde_n, 8192), 3))
+                ).double().to(device)
+                _rr = torch.minimum((_xs - XA3).norm(dim=1),
+                                    (_xs + XA3).norm(dim=1))
+                _r0 = _xs.norm(dim=1)
+                _x = _xs[(_rr > args.pde_rho_min) & (_r0 <= args.pde_rmax)]
+                if _x.shape[0] < 64:
+                    tt["sprof"] = None
+                    tt["sref"] = float("nan")
+                    continue
+                _ma = torch.tensor([0.5, tt["m2"]], dtype=torch.float64,
+                                   device=device)
+                _S = ((1.0 / 8.0) * physics.bowen_york_KK(_x, _ma, XS3, PS3, ST3)
+                      / torch.clamp(physics.psi_sing(_x, _ma, XS3),
+                                    min=1e-4) ** 7).abs()
+                _rn = _x.norm(dim=1).cpu().numpy()
+                _Sn = _S.cpu().numpy()
+                prof = np.full(_K, np.nan)
+                for k in range(_K):
+                    m = (_rn >= _edges[k]) & (_rn < _edges[k + 1])
+                    if m.sum() >= 8:
+                        prof[k] = float(np.sqrt(np.mean(_Sn[m] ** 2)))
+                # 空壳层用相邻值填充(单调递减),避免出现 0 或 NaN 被放大
+                ok = ~np.isnan(prof)
+                if ok.sum() == 0:
+                    prof = np.full(_K, float(np.sqrt(np.mean(_Sn ** 2))))
+                elif not ok.all():
+                    prof = np.interp(np.arange(_K), np.flatnonzero(ok),
+                                     prof[ok])
+                tt["sprof"] = prof
+                tt["sref"] = float(np.sqrt(np.mean(_Sn ** 2)))
+        _s10 = tens.get("q10", {}).get("sref", float("nan"))
+        _s100 = tens.get("q100", {}).get("sref", float("nan"))
+        log.info("[pde] rel 标定完成 (%.1fs): 壳层 %d 箱 [%.3g,%.3g]; "
+                 "S_ref(q10)=%.3e S_ref(q100)=%.3e; --pde-eps=%.3g "
+                 "→ 远场放大上限 %.1e", time.time() - t_ref, _K,
+                 _edges[0], _edges[-1], _s10, _s100, args.pde_eps,
+                 1.0 / max(args.pde_eps ** 2, 1e-30))
+
     def smooth_loss(lb0):
         """光滑化正则(2026-09-02 用户指示):远场 Laplacian 幅值 + 轴向凸性。
 
@@ -269,31 +344,40 @@ def main():
         l_cx = (torch.relu(-ua2 / sc) ** 2).mean()
         return l_lap, l_cx
 
-    def pde_loss(lb0):
-        """Hamilton 约束残差项(2026-09-11):outer/far 区惩罚真实残差 R=Δu+S。
+    def _pde_one(lb0, n_pts):
+        """单配置的 Hamilton 约束残差项,返回标量 loss 或 None。
 
-        与既有 smooth_w 的本质区别
-        --------------------------
-        smooth_w 惩罚 |Δu|²,但真解满足 Δu = −S 而非 Δu = 0,故它把解往
-        "调和"方向偏置,**并未使用任何物理信息**。此处惩罚的是 Hamilton
-        约束的真实残差
-
+        真实残差
+        --------
             R = Δu + S,   S = (1/8)·ψ^{-7}·K̄_ij K̄^ij,   ψ = ψ_sing + u
 
-        这才是把物理方程本身引入损失(即"充分利用物理信息")。
+        与 smooth_w 的本质区别:后者惩罚 |Δu|²,而真解满足 Δu = −S 而非
+        Δu = 0,故它把解往"调和"方向偏置,**并未使用物理信息**;此处惩罚
+        的是 Hamilton 约束本身的残差。
 
-        归一化与径向权重
-        ----------------
-        - 除以该批源项的 RMS(stop_grad)使梯度条件数与配置量级无关,
-          于是 l_pde ≈ (相对残差)²,可直接与评估口径的 ‖R‖/‖S‖ 对照;
-        - 权重 w(r0) 由 r_start 处的 0 升至 r_end 处的 1(可加指数 p),
-          远场权重最大 —— 因为远场源项极小、绝对残差也极小,若用统一
-          权重,远场贡献会被外场淹没。
+        归一化 --pde-norm
+        -----------------
+        batch: sig = RMS_批次(S),全场单一标量(默认,旧行为)。
+        rel  : sig_j = sqrt(S_shell(r0_j)² + (eps·S_ref)²),逐壳层。
+               |S_shell| >> eps·S_ref 处即相对残差 (R/S)²;|S_shell| <<
+               eps·S_ref 处退化为绝对残差 R/(eps·S_ref)。eps 即"远场放大
+               上限"旋钮(上限 ≈ 1/eps²)。
+
+        **实测:两者对远场的权重几乎相同。**
+        pde_resid_profile.py 对 q10/v6a 用**真实残差** R 分解实测:
+          · batch(eps=1): r0≥14 的远场已占 l_pde 的 98.97%;
+          · 把 eps 从 1 调到 0.01(放大上限 1→1e4),远场份额仅由
+            99.1% 变到 99.9%。
+        原因是损失权重 ∝ w·R²,而 |R| 在远场**最大**(r0≥22 处 rms
+        2.9e-4,r0≈10 处 5.7e-5),并非由源项 S 决定 ——
+        S 虽然按 r^{-6} 衰减,但 Δu 的误差增长得更快。
+        故 `batch` 并没有"忽略远场";远场精度上不去是收敛速度与批间
+        方差的问题,不是权重问题。`rel` 保留为可选实验开关,默认关闭。
         """
         t = tens[lb0]
         ma = torch.tensor([0.5, t["m2"]], dtype=torch.float64, device=device)
         pv = A2.param_vec(t["q"], t["m2"], device)
-        n_try = max(4 * args.pde_n, 512)
+        n_try = max(4 * n_pts, 512)
         xs_s = torch.from_numpy(
             rng.uniform(-args.pde_rmax, args.pde_rmax,
                         size=(n_try, 3))).double().to(device)
@@ -301,7 +385,7 @@ def main():
                            (xs_s + XA3).norm(dim=1))
         r0 = xs_s.norm(dim=1)
         keep = (rr > args.pde_rho_min) & (r0 <= args.pde_rmax)
-        x = xs_s[keep][:args.pde_n]
+        x = xs_s[keep][:n_pts]
         if x.shape[0] < 64:
             return None
         x.requires_grad_(True)
@@ -313,15 +397,41 @@ def main():
         with torch.no_grad():
             psi = torch.clamp(psi_s + u, min=1e-4)
             S = (1.0 / 8.0) * kk / psi ** 7
-            sig = torch.sqrt(torch.mean(S ** 2))
-            sig = sig.clamp(min=1e-3 * t["sq"] / 9.0, max=None)
+            if args.pde_norm == "rel" and t.get("sprof") is not None:
+                sp = torch.from_numpy(t["sprof"]).double().to(device)
+                k = (torch.bucketize(x.norm(dim=1), _PDE_EDGES_T) - 1)
+                k = k.clamp(0, sp.shape[0] - 1)
+                S_sh = sp[k]
+                sig = torch.sqrt(S_sh ** 2 + (args.pde_eps * t["sref"]) ** 2)
+            else:
+                sig = torch.sqrt(torch.mean(S ** 2))
+                sig = sig.clamp(min=1e-3 * t["sq"] / 9.0, max=None)
             r0x = x.norm(dim=1)
             span = max(args.pde_r_end - args.pde_r_start, 1e-9)
             w = ((r0x - args.pde_r_start) / span).clamp(0.0, 1.0)
             if args.pde_p != 1.0:
                 w = w ** args.pde_p
-        # 用加权平均(而非 mean):mean 会被 w=0 的点稀释,梯度传不到远场
+        # 加权平均(而非 mean):mean 会被 w=0 的点稀释,梯度传不到远场
         return (w * (R / sig) ** 2).sum() / w.sum().clamp(min=1e-12)
+
+    def pde_loss():
+        """在 --pde-cfgs 个随机配置上取残差项均值。
+
+        单配置版本每步只更新 63 个训练配置中的一个 —— 每个配置平均要等
+        63 步才拿到一次 PDE 监督。多配置(默认 8)把每配置的更新频率提高
+        pde_cfgs 倍,且对配置求均值可显著压低 l_pde 的批间方差。
+        """
+        n_c = max(1, min(args.pde_cfgs, len(train_labels)))
+        idx = rng.choice(len(train_labels), size=n_c, replace=False)
+        per_n = max(args.pde_n // n_c, 64)
+        vals = []
+        for i in idx:
+            v = _pde_one(train_labels[int(i)], per_n)
+            if v is not None:
+                vals.append(v)
+        if not vals:
+            return None
+        return torch.stack(vals).mean()
 
     def save_ckpt(step, final=False):
         ck = {"step": step, "fingerprint": fp, "model": model.state_dict(),
@@ -361,8 +471,7 @@ def main():
                 total = total + args.smooth_w * l_lap + args.convex_w * l_cx
         l_pde = None
         if args.pde_w > 0:
-            l_pde = pde_loss(
-                train_labels[int(rng.integers(0, len(train_labels)))])
+            l_pde = pde_loss()
             if l_pde is not None:
                 # 与 L_ref 同样做 EMA 归一 —— 使 --pde-w 直接表示"相对 L_ref
                 # 的权重占比"(否则 l_pde 的绝对量级随配置/阶段漂移,无法标定)

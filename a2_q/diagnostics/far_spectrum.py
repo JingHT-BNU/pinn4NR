@@ -99,8 +99,9 @@ def main():
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available()
-                          and args.device == "auto" else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     sys.path.insert(0, os.path.join(_ROOT, "tools"))
     import spectral_reference as sr
 

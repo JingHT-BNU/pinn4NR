@@ -84,8 +84,9 @@ def main():
     ap.add_argument("--skip-fig", action="store_true")
     args = ap.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() and args.device == "auto"
-                          else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
     model, ck = load_run(args.run, device)
     meta = ck["meta"]
     labels = sorted(meta.keys(), key=lambda lb: meta[lb]["q"])

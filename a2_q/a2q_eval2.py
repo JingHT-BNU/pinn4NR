@@ -194,8 +194,9 @@ def main():
     ap.add_argument("--skip-fig", action="store_true")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available()
-                          and args.device == "auto" else "cpu")
+    device = torch.device(
+        args.device if args.device != "auto"
+        else ("cuda" if torch.cuda.is_available() else "cpu"))
 
     a1_mode = args.a1 is not None
     if a1_mode:
