@@ -107,6 +107,15 @@ def main():
                          "实测 v6f 全部 45 配置 L2RE 变差 11%%,ring 差 40%%。")
     ap.add_argument("--far-n", type=int, default=1024,
                     help="每步远场监督采样点数(每配置)")
+    ap.add_argument("--sym-w", type=float, default=0.0,
+                    help="q=1 反演对称软约束的权重(相对 L_ref)。q=1 时构型在"
+                         "空间反演 x→−x 下自映射,故解必须满足 u(x)=u(−x)、"
+                         "偶极严格为 0;实测 v6a/v6g 在 q=1 的偶极分别为 "
+                         "4.5e-2/8.9e-3,而谱参考解为 2.3e-8")
+    ap.add_argument("--sym-n", type=int, default=2048,
+                    help="对称约束每步采样点数")
+    ap.add_argument("--sym-label", default="q10",
+                    help="用作对称约束的配置标签(须为 q=1)")
     ap.add_argument("--heldout", default="q15,q25,q50,q74,q86")
     ap.add_argument("--data-dir", default=DATA_DIR)
     ap.add_argument("--init-from", default=None,
@@ -200,7 +209,8 @@ def main():
          "pre": args.pde_r_end, "pp": args.pde_p,
          "pnorm": args.pde_norm, "peps": args.pde_eps,
          "pcfg": args.pde_cfgs,
-         "fw": args.far_w, "fn": args.far_n, "fdir": args.far_data_dir},
+         "fw": args.far_w, "fn": args.far_n, "fdir": args.far_data_dir,
+         "sw2": args.sym_w, "sn2": args.sym_n, "slb": args.sym_label},
         sort_keys=True).encode()).hexdigest()
     ck_dir = os.path.join(RUNS, args.exp_name)
     os.makedirs(ck_dir, exist_ok=True)
@@ -307,6 +317,33 @@ def main():
                       t["wmax"], t["sq"])
             per.append(((u - ur) ** 2).sum() / t["fnorm2"])
         return torch.stack(per).mean()
+
+    def sym_loss():
+        """q=1 反演对称软约束(2026-09-12)。
+
+        q=1 时 m1=m2=0.5、奇点在 x=±3、动量 P_y=∓0.2(反对称)。空间反演
+        x→−x(矢量随之为 −P)把两个奇点互换并保持构型不变,故解必须满足
+
+            u(x, y, z) = u(−x, −y, −z)
+
+        特别地远场偶极模长严格为 0。实测 q=1 的偶极:谱参考解 2.3e-8,
+        v6a 4.5e-2,v6g 8.9e-3 —— 模型违反了这一精确对称(而 q≠1 时模型与
+        参考解的偶极能对上 3~4 位有效数字,说明这是纯对称性问题)。
+
+        实现:同一组参数张量下同时前向 x 与 −x(反演下 XS3/PS3 恰为互换,
+        而互换只是重标号,数组本身不变),惩罚 |u(x)−u(−x)|²,以该配置的
+        平均参考方差 Σu_ref²/N 归一。
+        """
+        t = tens[args.sym_label]
+        idx = rng.integers(0, len(t["x"]), args.sym_n)
+        x = t["x"][idx]
+        ma = torch.tensor([0.5, t["m2"]], dtype=torch.float64, device=device)
+        pv = A2.param_vec(t["q"], t["m2"], device)
+        u_p = model(x, ma, XS3, PS3, ST3, pv, t["kappa"], t["wmin"],
+                    t["wmax"], t["sq"])
+        u_m = model(-x, ma, XS3, PS3, ST3, pv, t["kappa"], t["wmin"],
+                    t["wmax"], t["sq"])
+        return ((u_p - u_m) ** 2).mean() / (t["norm2"] / len(t["x"]))
 
     XS3 = torch.tensor([[3.0, 0, 0], [-3.0, 0, 0]],
                        dtype=torch.float64, device=device)
@@ -555,6 +592,10 @@ def main():
         if args.far_data_dir and args.far_w > 0 and far:
             l_far = far_loss()
             total = total + args.far_w * ema_bal("L_far", l_far)
+        l_sym = None
+        if args.sym_w > 0:
+            l_sym = sym_loss()
+            total = total + args.sym_w * ema_bal("L_sym", l_sym)
         total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         opt.step()
@@ -568,6 +609,8 @@ def main():
             hist.setdefault("l_pde", []).append(float(l_pde))
         if l_far is not None:
             hist.setdefault("l_far", []).append(float(l_far))
+        if l_sym is not None:
+            hist.setdefault("l_sym", []).append(float(l_sym))
         if s % log_every == 0 or s == 1:
             msg = "[step %6d/%d] L_ref=%.4e" % (s, args.steps, float(lr_))
             if l_lap is not None:
@@ -576,6 +619,8 @@ def main():
                 msg += " pde=%.3e" % float(l_pde)
             if l_far is not None:
                 msg += " far=%.3e" % float(l_far)
+            if l_sym is not None:
+                msg += " sym=%.3e" % float(l_sym)
             log.info(msg + " (%.0fs)", time.time() - t0)
         if s % 1000 == 0:
             save_ckpt(s)
