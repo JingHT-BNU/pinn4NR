@@ -43,6 +43,7 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from logutil import setup_logging
 import a2q_model as A2
+import physics
 
 log = logging.getLogger("paper.A2.a2q_train_v4")
 
@@ -69,6 +70,22 @@ def main():
                     help="轴向二阶导符号 hinge 权重(远场段与谷区 u''>0)")
     ap.add_argument("--smooth-n", type=int, default=1024,
                     help="每步光滑化正则采样点数")
+    # ---- Hamilton 约束残差项(2026-09-11)----
+    ap.add_argument("--pde-w", type=float, default=0.0,
+                    help="Hamilton 约束残差 R=Δu+S 的权重(outer/far 区,"
+                         "径向递增)。0 表示关闭")
+    ap.add_argument("--pde-n", type=int, default=1024,
+                    help="每步 PDE 残差采样点数")
+    ap.add_argument("--pde-rho-min", type=float, default=2.0,
+                    help="PDE 残差采样下限:ρ=min(r1,r2) 大于此值(剔除峰区)")
+    ap.add_argument("--pde-rmax", type=float, default=14.0,
+                    help="PDE 残差采样立方体半边长(同时为 r0 上界)")
+    ap.add_argument("--pde-r-start", type=float, default=3.0,
+                    help="径向权重起点:r0<=此值时权重为 0")
+    ap.add_argument("--pde-r-end", type=float, default=12.0,
+                    help="径向权重终点:r0>=此值时权重为 1")
+    ap.add_argument("--pde-p", type=float, default=1.0,
+                    help="径向权重指数:w=((r0-r_start)/(r_end-r_start))^p")
     ap.add_argument("--heldout", default="q15,q25,q50,q74,q86")
     ap.add_argument("--data-dir", default=DATA_DIR)
     ap.add_argument("--init-from", default=None,
@@ -125,7 +142,10 @@ def main():
          "labels": train_labels, "heldout": sorted(heldout),
          "init": args.init_from, "hn": args.hidden_neurons,
          "nb": args.n_basis, "sw": args.smooth_w, "cw": args.convex_w,
-         "sn": args.smooth_n},
+         "sn": args.smooth_n,
+         "pw": args.pde_w, "pn": args.pde_n, "prho": args.pde_rho_min,
+         "prmax": args.pde_rmax, "prs": args.pde_r_start,
+         "pre": args.pde_r_end, "pp": args.pde_p},
         sort_keys=True).encode()).hexdigest()
     ck_dir = os.path.join(RUNS, args.exp_name)
     os.makedirs(ck_dir, exist_ok=True)
@@ -249,6 +269,59 @@ def main():
         l_cx = (torch.relu(-ua2 / sc) ** 2).mean()
         return l_lap, l_cx
 
+    def pde_loss(lb0):
+        """Hamilton 约束残差项(2026-09-11):outer/far 区惩罚真实残差 R=Δu+S。
+
+        与既有 smooth_w 的本质区别
+        --------------------------
+        smooth_w 惩罚 |Δu|²,但真解满足 Δu = −S 而非 Δu = 0,故它把解往
+        "调和"方向偏置,**并未使用任何物理信息**。此处惩罚的是 Hamilton
+        约束的真实残差
+
+            R = Δu + S,   S = (1/8)·ψ^{-7}·K̄_ij K̄^ij,   ψ = ψ_sing + u
+
+        这才是把物理方程本身引入损失(即"充分利用物理信息")。
+
+        归一化与径向权重
+        ----------------
+        - 除以该批源项的 RMS(stop_grad)使梯度条件数与配置量级无关,
+          于是 l_pde ≈ (相对残差)²,可直接与评估口径的 ‖R‖/‖S‖ 对照;
+        - 权重 w(r0) 由 r_start 处的 0 升至 r_end 处的 1(可加指数 p),
+          远场权重最大 —— 因为远场源项极小、绝对残差也极小,若用统一
+          权重,远场贡献会被外场淹没。
+        """
+        t = tens[lb0]
+        ma = torch.tensor([0.5, t["m2"]], dtype=torch.float64, device=device)
+        pv = A2.param_vec(t["q"], t["m2"], device)
+        n_try = max(4 * args.pde_n, 512)
+        xs_s = torch.from_numpy(
+            rng.uniform(-args.pde_rmax, args.pde_rmax,
+                        size=(n_try, 3))).double().to(device)
+        rr = torch.minimum((xs_s - XA3).norm(dim=1),
+                           (xs_s + XA3).norm(dim=1))
+        r0 = xs_s.norm(dim=1)
+        keep = (rr > args.pde_rho_min) & (r0 <= args.pde_rmax)
+        x = xs_s[keep][:args.pde_n]
+        if x.shape[0] < 64:
+            return None
+        x.requires_grad_(True)
+        u = model(x, ma, XS3, PS3, ST3, pv, t["kappa"], t["wmin"],
+                  t["wmax"], t["sq"])
+        psi_s = physics.psi_sing(x, ma, XS3)
+        kk = physics.bowen_york_KK(x, ma, XS3, PS3, ST3)
+        R = physics.pde_residual(u, x, psi_s, kk)
+        with torch.no_grad():
+            psi = torch.clamp(psi_s + u, min=1e-4)
+            S = (1.0 / 8.0) * kk / psi ** 7
+            sig = torch.sqrt(torch.mean(S ** 2))
+            sig = sig.clamp(min=1e-3 * t["sq"] / 9.0, max=None)
+            r0x = x.norm(dim=1)
+            span = max(args.pde_r_end - args.pde_r_start, 1e-9)
+            w = ((r0x - args.pde_r_start) / span).clamp(0.0, 1.0)
+            if args.pde_p != 1.0:
+                w = w ** args.pde_p
+        return (w * (R / sig) ** 2).mean()
+
     def save_ckpt(step, final=False):
         ck = {"step": step, "fingerprint": fp, "model": model.state_dict(),
               "opt": opt.state_dict(), "sch": sch.state_dict(),
@@ -285,6 +358,12 @@ def main():
             if out_s is not None:
                 l_lap, l_cx = out_s
                 total = total + args.smooth_w * l_lap + args.convex_w * l_cx
+        l_pde = None
+        if args.pde_w > 0:
+            l_pde = pde_loss(
+                train_labels[int(rng.integers(0, len(train_labels)))])
+            if l_pde is not None:
+                total = total + args.pde_w * l_pde
         total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         opt.step()
@@ -294,14 +373,15 @@ def main():
         if l_lap is not None:
             hist.setdefault("l_lap", []).append(float(l_lap))
             hist.setdefault("l_cx", []).append(float(l_cx))
+        if l_pde is not None:
+            hist.setdefault("l_pde", []).append(float(l_pde))
         if s % log_every == 0 or s == 1:
+            msg = "[step %6d/%d] L_ref=%.4e" % (s, args.steps, float(lr_))
             if l_lap is not None:
-                log.info("[step %6d/%d] L_ref=%.4e lap=%.2e cx=%.2e (%.0fs)",
-                         s, args.steps, float(lr_), float(l_lap),
-                         float(l_cx), time.time() - t0)
-            else:
-                log.info("[step %6d/%d] L_ref=%.4e (%.0fs)", s, args.steps,
-                         float(lr_), time.time() - t0)
+                msg += " lap=%.2e cx=%.2e" % (float(l_lap), float(l_cx))
+            if l_pde is not None:
+                msg += " pde=%.3e" % float(l_pde)
+            log.info(msg + " (%.0fs)", time.time() - t0)
         if s % 1000 == 0:
             save_ckpt(s)
     save_ckpt(args.steps, final=True)
