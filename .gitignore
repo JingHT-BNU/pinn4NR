@@ -1,0 +1,32 @@
+# 数据与产物：一律本地保留，入库只会浪费 GitHub 空间。
+# 全部产物均可用 README.md 第 4 节的命令重新生成。
+data/
+logs/
+tools/refs/
+tools/refs_a2/
+tools/tp_work/
+runs/
+**/a2q_data/
+
+# 大文件与二进制
+*.npz
+*.npy
+*.pt
+*.pth
+*.ckpt
+*.pkl
+*.hdf5
+*.pdf
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器与系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
