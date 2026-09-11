@@ -367,6 +367,8 @@ def main():
                 sr_ = float(np.sqrt(np.mean(S[mask] ** 2)))
                 res["resid"][name] = {
                     "n": int(mask.sum()),
+                    "S_rms": sr_,                      # 该区源项 RMS(归一化基准)
+                    "R_rms": float(np.sqrt(np.mean(R[mask] ** 2))),   # 绝对残差
                     "R_rel_rms": float(np.sqrt(np.mean(R[mask] ** 2))
                                        / max(sr_, 1e-300))}
         # 逐区域的 |R| / (该区域源项 RMS) —— 用**区域自身**的 S 归一化，

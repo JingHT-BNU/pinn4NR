@@ -320,7 +320,8 @@ def main():
             w = ((r0x - args.pde_r_start) / span).clamp(0.0, 1.0)
             if args.pde_p != 1.0:
                 w = w ** args.pde_p
-        return (w * (R / sig) ** 2).mean()
+        # 用加权平均(而非 mean):mean 会被 w=0 的点稀释,梯度传不到远场
+        return (w * (R / sig) ** 2).sum() / w.sum().clamp(min=1e-12)
 
     def save_ckpt(step, final=False):
         ck = {"step": step, "fingerprint": fp, "model": model.state_dict(),
@@ -363,7 +364,9 @@ def main():
             l_pde = pde_loss(
                 train_labels[int(rng.integers(0, len(train_labels)))])
             if l_pde is not None:
-                total = total + args.pde_w * l_pde
+                # 与 L_ref 同样做 EMA 归一 —— 使 --pde-w 直接表示"相对 L_ref
+                # 的权重占比"(否则 l_pde 的绝对量级随配置/阶段漂移,无法标定)
+                total = total + args.pde_w * ema_bal("L_pde", l_pde)
         total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         opt.step()
