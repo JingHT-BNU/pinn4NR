@@ -369,7 +369,15 @@ def main():
                     "n": int(mask.sum()),
                     "R_rel_rms": float(np.sqrt(np.mean(R[mask] ** 2))
                                        / max(sr_, 1e-300))}
-        res["_R_hist"] = np.log10(np.abs(R) / max(s_rms, 1e-300))
+        # 逐区域的 |R| / (该区域源项 RMS) —— 用**区域自身**的 S 归一化，
+        # 否则源项极小的远场会被全局 S_rms 压到左边、看起来"很好"(误导)。
+        res["_R_rel_by_region"] = {
+            name: np.abs(R[mask]) / max(float(np.sqrt(np.mean(S[mask] ** 2))),
+                                        1e-300)
+            for name, mask in (("near", d < 0.5),
+                               ("mid", (d >= 0.5) & (d < 2.0)),
+                               ("outer", (d >= 2.0) & (r0 < 10.0)),
+                               ("far", r0 >= 10.0)) if mask.sum() > 10}
 
         # ---------- 2. ADM 质量与多极 ----------
         def psi_of(u_fn, pts):
@@ -466,7 +474,8 @@ def main():
 
     # ---------------- 输出 ----------------
     out = args.out or os.path.join(run_dir, "physics.json")
-    serial = {k: {kk: vv for kk, vv in v.items() if kk != "_R_hist"}
+    serial = {k: {kk: vv for kk, vv in v.items()
+                  if not kk.startswith("_")}
               for k, v in results.items()}
     with open(out, "w", encoding="utf-8") as f:
         json.dump({"run": os.path.relpath(run_dir, _ROOT),
@@ -540,16 +549,32 @@ def _figures(results, radii, fig_dir):
     qs = [results[l]["q"] for l in labels]
 
     # --- 图1: 残差分布 + 分区 ---
+    # 说明: 直方图按**区域自身**的源项 RMS 归一化后跨配置合并,
+    #       否则源项极小的远场会被全局 S_rms 压到最左侧, 看起来"很好"(误导)。
     fig, axes = plt.subplots(1, 3, figsize=(16, 4.4))
     ax = axes[0]
-    for lb in labels:
-        h = results[lb]["_R_hist"]
-        ax.hist(h, bins=60, histtype="step", lw=1.0,
-                label=f"{lb} (q={results[lb]['q']:.3g})")
-    ax.set_xlabel(r"$\log_{10}(|R|/S_{\rm rms})$")
+    cols = {"near": "tab:red", "mid": "tab:orange",
+            "outer": "tab:green", "far": "tab:blue"}
+    bins = np.linspace(-4, 4, 65)
+    for reg in ("near", "mid", "outer", "far"):
+        pooled = []
+        for lb in labels:
+            v = results[lb].get("_R_rel_by_region", {}).get(reg)
+            if v is not None:
+                pooled.append(np.log10(np.maximum(v, 1e-300)))
+        if not pooled:
+            continue
+        pooled = np.concatenate(pooled)
+        ax.hist(pooled, bins=bins, histtype="stepfilled", alpha=0.45,
+                color=cols[reg], edgecolor=cols[reg], lw=0.8,
+                label=f"{reg} (median $10^{{{np.median(pooled):.2f}}}$)")
+    ax.axvline(0.0, color="k", ls="--", lw=1)
+    ax.text(0.05, 0.92, r"$|R| = S_{\rm rms}$", transform=ax.transAxes,
+            fontsize=8)
+    ax.set_xlabel(r"$\log_{10}\left(|R| / S_{\rm rms}^{\rm region}\right)$")
     ax.set_ylabel("points")
-    ax.set_title("Hamilton residual distribution")
-    ax.legend(fontsize=7, ncol=2)
+    ax.set_title("Hamilton residual by region (configs pooled)")
+    ax.legend(fontsize=8, loc="upper left")
 
     ax = axes[1]
     for k, c in (("near", "tab:red"), ("mid", "tab:orange"),
