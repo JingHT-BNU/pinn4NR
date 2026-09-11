@@ -48,7 +48,7 @@ KAPPA_CACHE = os.path.join(_ROOT, "data", "multi_param_kappa_cache.json")
 
 def resolve_input_path(path, paper_root=None):
     """输入路径解析: 绝对路径原样返回; 相对路径优先按 CWD 解析,
-    不存在时锚定到仓库根 目录 (与运行时 CWD 无关)。"""
+    不存在时锚定到仓库根目录 (与运行时 CWD 无关)。"""
     if path is None or os.path.isabs(path):
         return path
     if os.path.exists(path):
@@ -690,7 +690,7 @@ def main():
     w_ref0 = args.w_ref if args.w_ref is not None else 167.0
     log.info(f"参考监督权重 w_ref0={w_ref0} (课程衰减至 {w_ref0*0.1:.0f})")
 
-    # out-dir 相对路径锚定到仓库根 目录(与运行时 CWD 无关,避免输出错位)
+    # out-dir 相对路径锚定到仓库根目录(与运行时 CWD 无关,避免输出错位)
     paper_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     if not os.path.isabs(args.out_dir):
         args.out_dir = os.path.join(paper_root, args.out_dir)
