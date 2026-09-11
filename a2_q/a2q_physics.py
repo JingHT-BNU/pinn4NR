@@ -61,6 +61,12 @@ SS = np.zeros((2, 3))
 DEFAULT_CONFIGS = "q05,q10,q20,q15,q25,q50,q74,q86,q100"
 
 
+def _seed_of(tag):
+    """确定性种子:内建 hash() 对 str 逐进程加盐,会导致跨 run 采样不同。"""
+    import zlib
+    return zlib.crc32(tag.encode("utf-8")) % (2 ** 31)
+
+
 # ----------------------------------------------------------------------
 # 采样
 # ----------------------------------------------------------------------
@@ -344,7 +350,9 @@ def main():
                          "train" if lb in train_labels else "zero_shot")}
 
         # ---------- 1. Hamilton 残差 ----------
-        regions = sample_stratified(args.n_res, seed=abs(hash(lb)) % (2 ** 31))
+        # 用 crc32 而非内建 hash():后者对 str 逐进程加盐(PYTHONHASHSEED),
+        # 会让每次运行采到不同的点,跨 run 比较出现假差异。
+        regions = sample_stratified(args.n_res, seed=_seed_of(lb))
         allpts = np.concatenate(list(regions.values()), 0)
         R, S, d, r0 = hamilton_residual(model, allpts, cinfo, device,
                                         chunk=args.chunk)
@@ -446,8 +454,7 @@ def main():
             fd = {}
             for reg, h in (("near", 0.02), ("mid", 0.05),
                            ("outer", 0.05), ("far", 0.15)):
-                pts = sample_region(reg, args.n_fd, seed=abs(hash(lb + reg))
-                                    % (2 ** 31))
+                pts = sample_region(reg, args.n_fd, seed=_seed_of(lb + reg))
                 lap_m, u_m = fd_laplacian(u_model, pts, h)
                 S_m = source_term(pts, m1, m2, u_m)
                 lap_r, u_r = fd_laplacian(
