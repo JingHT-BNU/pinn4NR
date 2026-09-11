@@ -125,9 +125,28 @@ python a2_q/data_pipeline/post_refs_v2.py
 
 # v3：在 v2 基础上增加远场 r0>5 加权（权重占比 29%→67%）→ data/datasets/a2q_data_v3
 python a2_q/data_pipeline/post_refsub_v3.py
+
+# v4：追加 r∈(10,28] 远场壳（16384 点/配置，占 Σw·u_ref² 的 25%）
+#     → data/datasets/a2q_data_v4      （约 1 分钟，纯求值）
+python a2_q/data_pipeline/post_refs_v4.py \
+    --out-dir data/datasets/a2q_data_v4 --n-far 16384 --far-share 0.25
 ```
 
 A2 最终（v6a）使用的是 **v3** 数据集。
+
+**为什么需要 v4**：v3 的采样点 r0 **上界恰为 10.000**（`x_int` 的 r0 最小二乘
+上界即 10，`x_bnd` 落在 r0=10 的球面上），即 `L_ref` 对 r>10 没有任何监督；
+而评估口径的 far 区是 r0>5 / r0≥10，物理型指标更是取到 r=28 —— 模型在
+那里纯属外推，只被 PDE 残差项这一项弱约束。这是远场 Hamilton 残差比谱
+参考解差 4~5 个数量级的根源。
+
+谱参考解本身没有这个限制：它用径向紧化 `r = R0(1+s)/(1-s)`（s∈[-1,1] →
+r∈[0,∞)）加球谐展开 l≤48 表示，`SpectralPunctureSolver.from_coefficients()
+.evaluate()` 可在任意半径求值（r=28 对应 s=0.302，位于 s 区间中部，是分辨率
+最好的区域；实测 float32 求值在 r∈[20,28] 的相对误差 5.1e-7）。
+
+v4 保留 v3 的全部内部点，只追加远场壳，并按"参照归一化质量"自动定权，使
+远场占 `Σ w·u_ref²` 的份额等于 `--far-share`。产物中 48.3% 的点位于 r>10。
 
 ### 4.4 训练模型
 
@@ -159,12 +178,28 @@ python a3_multiparam/multi_param_train.py --exp-name multi_param_v5 --steps 5000
 python a2_q/a2q_eval2.py --run data/runs/a2/a2q_v6a     # 新口径全指标 → eval2.json + figs/
 python a2_q/a2q_gates.py --runs data/runs/a2/a2q_v6a    # G1/G2/G3 门槛判定
 python a2_q/a2q_rough.py --run data/runs/a2/a2q_v6a     # 远场粗糙度（二阶导符号翻转计数）
+python a2_q/a2q_physics.py --run data/runs/a2/a2q_v6a --fd-ref \
+    --n-fd 200 --n-res 12000                            # 物理型指标: Hamilton 残差 + ADM 多极
+python a2_q/compare_runs.py --runs a2q_v6a,a2q_v6d,a2q_v6e   # 五套口径横向汇总
 python a3_multiparam/multi_param_eval.py --exp runs/multi_param_v5
+```
+
+诊断工具（`a2_q/diagnostics/`，均为一次性探查、不产出正式指标）：
+
+```bash
+python a2_q/diagnostics/pde_resid_profile.py --config q10 --run data/runs/a2/a2q_v6a
+#   Hamilton 残差项的权重结构:按 r0 壳层给出 S、|R| 与损失份额
+python a2_q/diagnostics/far_spectrum.py --run data/runs/a2/a2q_v6a
+#   沿 +x/+z/体对角线比较模型与参考解,判断远场误差是"平滑大尺度"还是"高频抖动"
 ```
 
 **A2 通过标准**（`data/gates_config.json`，基于 A1 base 新口径校准 T=9.495e-3）：
 G1 global ≤ 1.25T；G2 峰高比 h ∈ [0.95,1.05] 且分区 pk ≤ 1.4e-2；
 G3 谷深比 d ∈ [0.95,1.05] 且 vy ≤ 2.3e-2。训练配置与 5 个零样本配置同门槛。
+
+**注意**：门槛的比例区间是 `[0.95, 1.05]`，不是 `[0.99, 1.01]`。用后者自测
+会把 v6a/v6d 误判成 36/45，官方判定是 45/45。引用门槛数请直接跑
+`a2q_gates.py` 或 `compare_runs.py`，不要目测。
 
 ---
 
