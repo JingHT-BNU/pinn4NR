@@ -96,6 +96,17 @@ def main():
     ap.add_argument("--pde-cfgs", type=int, default=1,
                     help="每步参与 PDE 残差的配置数(总点数仍为 --pde-n)"
                          "。1=旧行为(每配置约 63 步才被监督一次)")
+    ap.add_argument("--far-data-dir", default=None,
+                    help="远场参考解目录(只含 refsub_*.npz,由 "
+                         "post_refs_v4.py --far-only 生成)。给定后启用**独立**"
+                         "的远场监督项 --far-w")
+    ap.add_argument("--far-w", type=float, default=0.0,
+                    help="远场值监督项的权重(相对 L_ref)。远场必须做成独立项:"
+                         "若把远场点并进 refsub 一起算 L_ref,远场权重 w≈26 会占"
+                         "掉 88%% 的权重和,把内区(尤其 ring 峰尖)挤掉 —— "
+                         "实测 v6f 全部 45 配置 L2RE 变差 11%%,ring 差 40%%。")
+    ap.add_argument("--far-n", type=int, default=1024,
+                    help="每步远场监督采样点数(每配置)")
     ap.add_argument("--heldout", default="q15,q25,q50,q74,q86")
     ap.add_argument("--data-dir", default=DATA_DIR)
     ap.add_argument("--init-from", default=None,
@@ -138,6 +149,36 @@ def main():
     if not train_labels:
         raise SystemExit("无训练配置")
 
+    # 远场独立监督项:只含 refsub_*.npz(由 post_refs_v4.py --far-only 生成)
+    far = {}
+    if args.far_data_dir:
+        for lb in all_labels:
+            rp = os.path.join(args.far_data_dir, f"refsub_{lb}.npz")
+            if not os.path.exists(rp):
+                log.warning("远场数据缺 %s,该配置跳过 far_loss", lb)
+                continue
+            d = cfgs[lb]
+            zr = np.load(rp)
+            xf = zr["x"].astype(np.float64)
+            uf = zr["u"].astype(np.float64)
+            r0 = np.linalg.norm(xf, axis=1)
+            far[lb] = dict(
+                x=torch.from_numpy(xf).double().to(device),
+                u=torch.from_numpy(uf).double().to(device),
+                q=float(d["q"]), m2=float(d["m2"]),
+                kappa=float(d["kappa"]), sq=float(d["sq"]),
+                wmin=float(d["wmin"]), wmax=float(d["wmax"]),
+                fnorm2=float(np.sum(uf ** 2)) or 1.0)
+        if far:
+            _n = np.mean([len(far[lb]["x"]) for lb in far])
+            _r = np.mean([np.linalg.norm(far[lb]["x"].cpu().numpy(),
+                                         axis=1).mean() for lb in far])
+            log.info("远场监督: %d 配置, 平均 %.0f 点/配置, 平均 r0=%.1f",
+                     len(far), _n, _r)
+        else:
+            log.error("--far-data-dir 中没有任何 refsub_*.npz")
+            raise SystemExit(2)
+
     model = A2.make_model(args.variant, device,
                           hidden_neurons=args.hidden_neurons,
                           n_basis=args.n_basis).double()
@@ -158,7 +199,8 @@ def main():
          "prmax": args.pde_rmax, "prs": args.pde_r_start,
          "pre": args.pde_r_end, "pp": args.pde_p,
          "pnorm": args.pde_norm, "peps": args.pde_eps,
-         "pcfg": args.pde_cfgs},
+         "pcfg": args.pde_cfgs,
+         "fw": args.far_w, "fn": args.far_n, "fdir": args.far_data_dir},
         sort_keys=True).encode()).hexdigest()
     ck_dir = os.path.join(RUNS, args.exp_name)
     os.makedirs(ck_dir, exist_ok=True)
@@ -235,6 +277,35 @@ def main():
             # 常数),而非当前 1024 点子样本上的估计 —— 后者把抽样的随机性
             # 直接注入每一层的损失尺度,是无谓的梯度噪声来源。
             per.append((w * r2).sum() / t["norm2"])
+        return torch.stack(per).mean()
+
+    def far_loss():
+        """**独立**的远场值监督项(2026-09-12)。
+
+        背景:refsub 只覆盖 r<=10,L_ref 对 r>10 完全没有监督,故远场的
+        Hamilton 残差比参考解差 4~5 个数量级(v6a: far 4.13e2)。
+
+        为什么必须独立成项,而不是把远场点并进 refsub:
+          远场点 rms 比内区小(衰减弱),要让远场在 Σw·u_ref² 里占到份额,
+          就必须把 w 抬到 ~26;而 Σw 会被远场主导(88%),内区(尤其峰尖
+          ring)随之被挤掉。实测 v6f(并入 refsub,w_far≈26)45/45 配置
+          L2RE 全部变差、global 均值 3.78e-3→4.29e-3、ring 差 40%。
+        独立成项后 L_ref 保持 v3 原样,内区精度不受扰动,--far-w 单独可调。
+
+        归一化:除以该配置远场点的 Σw·u_ref²(启动时算一次的常数),
+        使 l_far ≈ 远场的加权相对均方误差,与 --far-w 的语义一致。
+        """
+        per = []
+        for lb in train_labels:
+            t = far[lb]
+            idx = rng.integers(0, len(t["x"]), args.far_n)
+            x, ur = t["x"][idx], t["u"][idx]
+            ma = torch.tensor([0.5, t["m2"]], dtype=torch.float64,
+                              device=device)
+            pv = A2.param_vec(t["q"], t["m2"], device)
+            u = model(x, ma, XS3, PS3, ST3, pv, t["kappa"], t["wmin"],
+                      t["wmax"], t["sq"])
+            per.append(((u - ur) ** 2).sum() / t["fnorm2"])
         return torch.stack(per).mean()
 
     XS3 = torch.tensor([[3.0, 0, 0], [-3.0, 0, 0]],
@@ -480,6 +551,10 @@ def main():
                 # 与 L_ref 同样做 EMA 归一 —— 使 --pde-w 直接表示"相对 L_ref
                 # 的权重占比"(否则 l_pde 的绝对量级随配置/阶段漂移,无法标定)
                 total = total + args.pde_w * ema_bal("L_pde", l_pde)
+        l_far = None
+        if args.far_data_dir and args.far_w > 0 and far:
+            l_far = far_loss()
+            total = total + args.far_w * ema_bal("L_far", l_far)
         total.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 10.0)
         opt.step()
@@ -491,12 +566,16 @@ def main():
             hist.setdefault("l_cx", []).append(float(l_cx))
         if l_pde is not None:
             hist.setdefault("l_pde", []).append(float(l_pde))
+        if l_far is not None:
+            hist.setdefault("l_far", []).append(float(l_far))
         if s % log_every == 0 or s == 1:
             msg = "[step %6d/%d] L_ref=%.4e" % (s, args.steps, float(lr_))
             if l_lap is not None:
                 msg += " lap=%.2e cx=%.2e" % (float(l_lap), float(l_cx))
             if l_pde is not None:
                 msg += " pde=%.3e" % float(l_pde)
+            if l_far is not None:
+                msg += " far=%.3e" % float(l_far)
             log.info(msg + " (%.0fs)", time.time() - t0)
         if s % 1000 == 0:
             save_ckpt(s)

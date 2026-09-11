@@ -99,6 +99,9 @@ def main():
     ap.add_argument("--r-far", type=float, default=28.0)
     ap.add_argument("--far-share", type=float, default=0.25,
                     help="远场在 Σ w·u_ref² (损失分母)中占的目标份额")
+    ap.add_argument("--far-only", action="store_true",
+                    help="只写远场点(供训练器的独立远场损失项 --far-data-dir 用)。"
+                         "此时 w 全为 1,由训练器按自身 Σw·u_ref² 归一")
     ap.add_argument("--config", default=None, help="只处理单个配置(验证用)")
     ap.add_argument("--dry-run", action="store_true",
                     help="只报告统计,不写文件")
@@ -155,20 +158,28 @@ def main():
 
         # 按"参照归一化质量"定权:使远场占 Σ w u_ref² 的份额 ≈ far_share
         #   Σ_in w0 u0²  vs  Σ_far wf uf²
+        # --far-only 模式下不改内部点,也不做质量定权(w=1),因为训练器会把
+        # 远场当作**独立损失项**,按它自己的 Σw·u_ref² 归一,权重由 --far-w 控制。
         mass_in = float(np.sum(w0 * u0 ** 2))
         mass_far_raw = float(np.sum(uf ** 2))
-        if mass_far_raw > 0 and args.far_share > 0:
+        if args.far_only:
+            wf = 1.0
+        elif mass_far_raw > 0 and args.far_share > 0:
             wf = args.far_share / (1.0 - args.far_share) * mass_in / mass_far_raw
         else:
             wf = 0.0
         w_far = np.full(len(xf), wf)
 
-        x = np.concatenate([x0, xf])
-        u = np.concatenate([u0, uf])
-        w = np.concatenate([w0, w_far])
+        if args.far_only:
+            x, u, w = xf, uf, w_far
+        else:
+            x = np.concatenate([x0, xf])
+            u = np.concatenate([u0, uf])
+            w = np.concatenate([w0, w_far])
 
         m_frac = float(np.sum(w * u ** 2))
-        share = float(np.sum(w_far * uf ** 2)) / max(m_frac, 1e-300)
+        share = float(np.sum(w_far * uf ** 2)) / max(m_frac, 1e-300) \
+            if not args.far_only else 1.0
         rec = dict(lb=lb, n_in=len(x0), n_far=len(xf), sec=round(el, 1),
                    r0_in_max=float(r0.max()), far_rms=float(
                        np.sqrt(np.mean(uf ** 2))),
@@ -184,8 +195,9 @@ def main():
             continue
         np.savez(os.path.join(args.out_dir, f"refsub_{lb}.npz"),
                  x=x, u=u, w=w)
-        shutil.copyfile(os.path.join(SRC_DIR, f"cfg_{lb}.npz"),
-                        os.path.join(args.out_dir, f"cfg_{lb}.npz"))
+        if not args.far_only:
+            shutil.copyfile(os.path.join(SRC_DIR, f"cfg_{lb}.npz"),
+                            os.path.join(args.out_dir, f"cfg_{lb}.npz"))
 
     if log and not args.dry_run:
         with open(os.path.join(args.out_dir, "_summary.json"), "w",
