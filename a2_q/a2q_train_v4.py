@@ -116,6 +116,11 @@ def main():
                     help="对称约束每步采样点数")
     ap.add_argument("--sym-label", default="q10",
                     help="用作对称约束的配置标签(须为 q=1)")
+    ap.add_argument("--sym-far", action="store_true",
+                    help="对称约束改用**远场点**(r>10)采样。必须这样:偶极是"
+                         "在 r∈[10,26] 的球面拟合上提取的,而 refsub 的点几乎"
+                         "都在 r<10 —— v6i 实测 l_sym 降了 17 倍,拟合出的偶极"
+                         "却只降 3.1 倍,就是采样区与度量区不匹配所致")
     ap.add_argument("--heldout", default="q15,q25,q50,q74,q86")
     ap.add_argument("--data-dir", default=DATA_DIR)
     ap.add_argument("--init-from", default=None,
@@ -210,7 +215,8 @@ def main():
          "pnorm": args.pde_norm, "peps": args.pde_eps,
          "pcfg": args.pde_cfgs,
          "fw": args.far_w, "fn": args.far_n, "fdir": args.far_data_dir,
-         "sw2": args.sym_w, "sn2": args.sym_n, "slb": args.sym_label},
+         "sw2": args.sym_w, "sn2": args.sym_n, "slb": args.sym_label,
+         "sfar": args.sym_far},
         sort_keys=True).encode()).hexdigest()
     ck_dir = os.path.join(RUNS, args.exp_name)
     os.makedirs(ck_dir, exist_ok=True)
@@ -335,8 +341,10 @@ def main():
         平均参考方差 Σu_ref²/N 归一。
         """
         t = tens[args.sym_label]
-        idx = rng.integers(0, len(t["x"]), args.sym_n)
-        x = t["x"][idx]
+        src = far[args.sym_label] if (args.sym_far and args.sym_label in far) \
+            else t
+        idx = rng.integers(0, len(src["x"]), args.sym_n)
+        x = src["x"][idx]
         ma = torch.tensor([0.5, t["m2"]], dtype=torch.float64, device=device)
         pv = A2.param_vec(t["q"], t["m2"], device)
         u_p = model(x, ma, XS3, PS3, ST3, pv, t["kappa"], t["wmin"],
