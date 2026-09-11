@@ -195,7 +195,8 @@ def main():
             u=torch.from_numpy(r["u"]).double().to(device),
             w=torch.from_numpy(r["w"]).double().to(device),
             q=float(d["q"]), m2=float(d["m2"]), kappa=float(d["kappa"]),
-            sq=float(d["sq"]), wmin=float(d["wmin"]), wmax=float(d["wmax"]))
+            sq=float(d["sq"]), wmin=float(d["wmin"]), wmax=float(d["wmax"]),
+            norm2=float(np.sum(r["w"] * r["u"] ** 2)) or 1.0)
 
     def ema_bal(nm, v):
         fv = float(v)
@@ -230,7 +231,10 @@ def main():
             u = model(x, ma, xs, Ps, St, pv, t["kappa"], t["wmin"],
                       t["wmax"], t["sq"])
             r2 = (u - ur) ** 2
-            per.append((w * r2).sum() / ((w * ur ** 2).sum() + 1e-30))
+            # 分母用**该配置全量参考点的** Σw·u_ref²(启动时算一次的确定性
+            # 常数),而非当前 1024 点子样本上的估计 —— 后者把抽样的随机性
+            # 直接注入每一层的损失尺度,是无谓的梯度噪声来源。
+            per.append((w * r2).sum() / t["norm2"])
         return torch.stack(per).mean()
 
     XS3 = torch.tensor([[3.0, 0, 0], [-3.0, 0, 0]],
