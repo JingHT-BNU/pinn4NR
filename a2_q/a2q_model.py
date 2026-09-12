@@ -658,6 +658,83 @@ class OperatorV7Ansatz(OperatorV6Ansatz):
                 + dF * chi_far)
 
 
+class OperatorV8Ansatz(OperatorV6Ansatz):
+    """A2-1 v8:v6 + 可学习高斯针尖凸起(2026-09-12)。
+
+    依据(gaussian_tip_fit.py 实测, tq100/v6l):
+    - 针尖亏损 D = u_ref - u_model 在小黑洞近域被
+      a*exp(-(r/0.158)^2) + c 解释 98.2% 的方差;
+    - opv7 的 MLP tip 通道因乘性链条( kappa*u_g ~ 1e-6 )梯度条件差,
+      3000 步后 g_tip rms 仅 0.0033, 未激活;
+    - 高斯振幅的梯度路径是直接的( d u/d a = exp(-(r/sigma)^2) = O(1) ),
+      条件数与振幅尺度无关。
+
+    结构:u += A_1*exp(-(r_1/s_1)^2) + A_2*exp(-(r_2/s_2)^2)
+    其中 A_i = kappa*sq*tanh(raw_a_i)(有界, 零初始化 => 初始与 v6 逐位
+    等价), s_i = sigma0*exp(tanh(raw_s_i)*ln4) (初值 sigma0=0.16, 即实测
+    亏损宽度)。raw 由 tiny head(pin -> 16 -> 4) 从配置参数生成, 使凸起
+    随 q 连续变化(大 q 亏损大, 中段 q 亏损小)。
+    """
+
+    def __init__(self, hidden_layers=4, hidden_neurons=128, n_basis=128,
+                 radii=(0.5, 1.5, 4.0), n_dirs=8,
+                 freqs=(1.0, 2.0, 4.0, 8.0, 16.0),
+                 freqs_far=(0.5, 1.0, 2.0),
+                 near_cut=0.8, near_width=0.25,
+                 sigma0=0.16, sigma_span=4.0, head_hidden=16):
+        super().__init__(hidden_layers=hidden_layers,
+                         hidden_neurons=hidden_neurons, n_basis=n_basis,
+                         radii=radii, n_dirs=n_dirs, freqs=freqs,
+                         freqs_far=freqs_far, near_cut=near_cut,
+                         near_width=near_width)
+        # param_vec = [log10(q), m2/5] 已是对数尺度编码, head 直接吃 2 维
+        self.tip_head = nn.Sequential(
+            nn.Linear(2, head_hidden), nn.SiLU(),
+            nn.Linear(head_hidden, 4))
+        for m in self.tip_head.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.zeros_(m.bias)
+        nn.init.zeros_(self.tip_head[-1].weight)
+        nn.init.zeros_(self.tip_head[-1].bias)
+        self.sigma0 = float(sigma0)
+        self.log_sigma_span = float(np.log(sigma_span))
+
+    def forward(self, x, masses, xs, Ps, Ss, params, kappa, wmin, wmax, sq):
+        ug = physics.guide_u(x, masses, xs, Ps, Ss).to(x.dtype)
+        w = (ug - wmin) / (wmax - wmin + 1e-8)
+        feats_pt = torch.stack([torch.log1p(ug.abs() / sq), w], dim=-1)
+        pin = params.to(x.dtype)
+        if pin.shape[0] == 1 and x.shape[0] > 1:
+            pin = pin.expand(x.shape[0], -1)
+        psi = torch.tanh(self.near(torch.cat(
+            [self._embed_x(x), feats_pt, self._embed_p(pin)],
+            dim=-1)).squeeze(-1))
+        b = self.branch(torch.cat([self.sensor_feats(
+            x, masses, xs, Ps, Ss, sq).to(ug.dtype), pin], dim=-1))
+        t = self.trunk(self._embed_x(x))
+        dF = (b * t).sum(-1)
+        r1 = (x - xs[0]).norm(dim=1)
+        r2 = (x - xs[1]).norm(dim=1)
+        rho = torch.minimum(r1, r2)
+        chi_far = torch.sigmoid((rho - self.near_cut) / self.near_width)
+        mF = torch.tanh(self.mfar(torch.cat(
+            [self._embed_x(x, self.freq_far_buf), feats_pt,
+             self._embed_p(pin, self.freq_far_buf)],
+            dim=-1)).squeeze(-1))
+        raw = self.tip_head(pin)
+        amp1 = kappa * sq * torch.tanh(raw[..., 0])
+        amp2 = kappa * sq * torch.tanh(raw[..., 1])
+        s1 = self.sigma0 * torch.exp(
+            torch.tanh(raw[..., 2]) * self.log_sigma_span)
+        s2 = self.sigma0 * torch.exp(
+            torch.tanh(raw[..., 3]) * self.log_sigma_span)
+        bump = (amp1 * torch.exp(-(r1 / s1) ** 2)
+                + amp2 * torch.exp(-(r2 / s2) ** 2))
+        return (kappa * ug * (1.0 + w * psi + chi_far * mF) + dF * chi_far
+                + bump)
+
+
 def fibonacci_dirs_v4(n):
     return fibonacci_dirs(n)
 
@@ -689,6 +766,10 @@ def make_model(variant, device, hidden_layers=4, hidden_neurons=128,
                                  n_basis=n_basis)
     elif variant == "opv7":
         model = OperatorV7Ansatz(hidden_layers=hidden_layers,
+                                 hidden_neurons=hidden_neurons,
+                                 n_basis=n_basis)
+    elif variant == "opv8":
+        model = OperatorV8Ansatz(hidden_layers=hidden_layers,
                                  hidden_neurons=hidden_neurons,
                                  n_basis=n_basis)
     elif variant == "c2":

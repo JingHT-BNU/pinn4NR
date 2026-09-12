@@ -56,7 +56,7 @@ def main():
     setup_logging("A2", "a2q_train_v4")
     ap = argparse.ArgumentParser()
     ap.add_argument("--variant", required=True,
-                    choices=["opv4", "opv5", "opv6", "opv7", "c2"])
+                    choices=["opv4", "opv5", "opv6", "opv7", "opv8", "c2"])
     ap.add_argument("--exp-name", required=True)
     ap.add_argument("--steps", type=int, default=15000)
     ap.add_argument("--lr", type=float, default=1e-4)
