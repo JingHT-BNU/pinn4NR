@@ -198,7 +198,24 @@ def main():
                           n_basis=args.n_basis).double()
     n_par = sum(p.numel() for p in model.parameters())
     log.info("参数量: %d", n_par)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
+    # opv7/v8a 教训:零初始化的新通道(如 opv8 的 tip_head)梯度被主任务
+    # 稀释,Adam 在 lr=1e-5 下 3000 步只走 ~0.18,达不到所需幅度。
+    # 给零初始化通道单独参数组提学习率(仅几百参数,初始输出为 0,
+    # 提速不破坏热启动等价性)。
+    zero_init_params, base_params = [], []
+    for n_, p_ in model.named_parameters():
+        # 仅新增的零初始化通道(opv7 tip / opv8 tip_head)
+        (zero_init_params if ".tip" in n_ or n_.startswith("tip")
+         else base_params).append(p_)
+    if zero_init_params:
+        opt = torch.optim.Adam([
+            {"params": base_params, "lr": args.lr},
+            {"params": zero_init_params, "lr": args.lr * 30.0},
+        ])
+        log.info("[优化器] 零初始化通道 %d 个参数, lr=%g (x30)",
+                 len(zero_init_params), args.lr * 30.0)
+    else:
+        opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.steps,
                                                      eta_min=args.lr * 0.01)
 

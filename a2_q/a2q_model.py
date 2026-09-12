@@ -670,10 +670,14 @@ class OperatorV8Ansatz(OperatorV6Ansatz):
       条件数与振幅尺度无关。
 
     结构:u += A_1*exp(-(r_1/s_1)^2) + A_2*exp(-(r_2/s_2)^2)
-    其中 A_i = kappa*sq*tanh(raw_a_i)(有界, 零初始化 => 初始与 v6 逐位
+    其中 A_i = amp_scale*kappa*sq*tanh(raw_a_i)(零初始化 => 初始与 v6 逐位
     等价), s_i = sigma0*exp(tanh(raw_s_i)*ln4) (初值 sigma0=0.16, 即实测
     亏损宽度)。raw 由 tiny head(pin -> 16 -> 4) 从配置参数生成, 使凸起
     随 q 连续变化(大 q 亏损大, 中段 q 亏损小)。
+
+    v8a 教训:amp 锚点须放大 —— tq100 所需凸起 8.4e-7 = 2.3*kappa*sq,
+    v8a 的 tanh 范围(+/-1*kappa*sq)不够;且 Adam 每步只走 ~lr,
+    tip_head 需单独参数组提高学习率(见 a2q_train_v4.py)。
     """
 
     def __init__(self, hidden_layers=4, hidden_neurons=128, n_basis=128,
@@ -681,7 +685,8 @@ class OperatorV8Ansatz(OperatorV6Ansatz):
                  freqs=(1.0, 2.0, 4.0, 8.0, 16.0),
                  freqs_far=(0.5, 1.0, 2.0),
                  near_cut=0.8, near_width=0.25,
-                 sigma0=0.16, sigma_span=4.0, head_hidden=16):
+                 sigma0=0.16, sigma_span=4.0, head_hidden=16,
+                 amp_scale=8.0):
         super().__init__(hidden_layers=hidden_layers,
                          hidden_neurons=hidden_neurons, n_basis=n_basis,
                          radii=radii, n_dirs=n_dirs, freqs=freqs,
@@ -699,6 +704,9 @@ class OperatorV8Ansatz(OperatorV6Ansatz):
         nn.init.zeros_(self.tip_head[-1].bias)
         self.sigma0 = float(sigma0)
         self.log_sigma_span = float(np.log(sigma_span))
+        # tanh=1 时凸起最大 amp_scale*kappa*sq。tq100 实测亏损 8.4e-7 =
+        # 2.3*kappa*sq, 故 amp_scale=8 给足余量且仍低于 u_tip(4.6e-6)
+        self.amp_scale = float(amp_scale)
 
     def forward(self, x, masses, xs, Ps, Ss, params, kappa, wmin, wmax, sq):
         ug = physics.guide_u(x, masses, xs, Ps, Ss).to(x.dtype)
@@ -723,8 +731,8 @@ class OperatorV8Ansatz(OperatorV6Ansatz):
              self._embed_p(pin, self.freq_far_buf)],
             dim=-1)).squeeze(-1))
         raw = self.tip_head(pin)
-        amp1 = kappa * sq * torch.tanh(raw[..., 0])
-        amp2 = kappa * sq * torch.tanh(raw[..., 1])
+        amp1 = (kappa * sq * self.amp_scale * torch.tanh(raw[..., 0]))
+        amp2 = (kappa * sq * self.amp_scale * torch.tanh(raw[..., 1]))
         s1 = self.sigma0 * torch.exp(
             torch.tanh(raw[..., 2]) * self.log_sigma_span)
         s2 = self.sigma0 * torch.exp(
