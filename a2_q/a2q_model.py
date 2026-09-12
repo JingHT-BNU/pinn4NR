@@ -586,6 +586,78 @@ class OperatorV6Ansatz(nn.Module):
         return kappa * ug * (1.0 + w * psi + chi_far * mF) + dF * chi_far
 
 
+class OperatorV7Ansatz(OperatorV6Ansatz):
+    """A2-1 v7:v6 + 零初始化"针尖通道"(2026-09-12)。
+
+    动机(needle_profile.py 实测, tq100/v6l):
+    - 峰比值 h(q=100) = 0.87,模型在小黑洞针尖(x=+3, d<0.4)低估 18%;
+    - 300 步纯针尖微调后仅 0.819 -> 0.830 即平台 —— **容量问题**而非采样;
+    - 近场通道频率编码最高 16,而针尖特征宽度 ~0.2-0.4(需 freq ~30+);
+      且 psi_N 为 tanh 有界乘性,修尖锐增量峰的动态范围受限。
+
+    结构:tip 通道与 near 同构但独立参数,自带高频编码 (8,16,32,64),
+    输出 tanh 有界,以乘性方式叠加进近场修正项 1 + w*(psi_N + g_tip)。
+    末层零初始化 => g_tip = 0,初始模型与 v6 **逐位等价**,可无损热启动
+    (v6 state_dict 以 strict=False 载入,tip 参数保持零初始化)。
+    """
+
+    def __init__(self, hidden_layers=4, hidden_neurons=128, n_basis=128,
+                 radii=(0.5, 1.5, 4.0), n_dirs=8,
+                 freqs=(1.0, 2.0, 4.0, 8.0, 16.0),
+                 freqs_far=(0.5, 1.0, 2.0),
+                 freqs_tip=(8.0, 16.0, 32.0, 64.0),
+                 near_cut=0.8, near_width=0.25, tip_neurons=64):
+        super().__init__(hidden_layers=hidden_layers,
+                         hidden_neurons=hidden_neurons, n_basis=n_basis,
+                         radii=radii, n_dirs=n_dirs, freqs=freqs,
+                         freqs_far=freqs_far, near_cut=near_cut,
+                         near_width=near_width)
+        self.register_buffer("freq_tip_buf",
+                             torch.tensor(freqs_tip, dtype=torch.float64),
+                             persistent=False)
+        coord_dim_tip = 3 + 3 * 2 * len(freqs_tip)
+        pin_dim_tip = 2 + 2 * 2 * len(freqs_tip)
+        self.tip = nn.Sequential(
+            nn.Linear(coord_dim_tip + 2 + pin_dim_tip, tip_neurons), nn.SiLU(),
+            nn.Linear(tip_neurons, tip_neurons), nn.SiLU(),
+            nn.Linear(tip_neurons, 1))
+        for m in self.tip.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                nn.init.zeros_(m.bias)
+        nn.init.zeros_(self.tip[-1].weight)
+        nn.init.zeros_(self.tip[-1].bias)
+
+    def forward(self, x, masses, xs, Ps, Ss, params, kappa, wmin, wmax, sq):
+        ug = physics.guide_u(x, masses, xs, Ps, Ss).to(x.dtype)
+        w = (ug - wmin) / (wmax - wmin + 1e-8)
+        feats_pt = torch.stack([torch.log1p(ug.abs() / sq), w], dim=-1)
+        pin = params.to(x.dtype)
+        if pin.shape[0] == 1 and x.shape[0] > 1:
+            pin = pin.expand(x.shape[0], -1)
+        psi = torch.tanh(self.near(torch.cat(
+            [self._embed_x(x), feats_pt, self._embed_p(pin)],
+            dim=-1)).squeeze(-1))
+        g_tip = torch.tanh(self.tip(torch.cat(
+            [self._embed_x(x, self.freq_tip_buf), feats_pt,
+             self._embed_p(pin, self.freq_tip_buf)],
+            dim=-1)).squeeze(-1))
+        b = self.branch(torch.cat([self.sensor_feats(
+            x, masses, xs, Ps, Ss, sq).to(ug.dtype), pin], dim=-1))
+        t = self.trunk(self._embed_x(x))
+        dF = (b * t).sum(-1)
+        r1 = (x - xs[0]).norm(dim=1)
+        r2 = (x - xs[1]).norm(dim=1)
+        rho = torch.minimum(r1, r2)
+        chi_far = torch.sigmoid((rho - self.near_cut) / self.near_width)
+        mF = torch.tanh(self.mfar(torch.cat(
+            [self._embed_x(x, self.freq_far_buf), feats_pt,
+             self._embed_p(pin, self.freq_far_buf)],
+            dim=-1)).squeeze(-1))
+        return (kappa * ug * (1.0 + w * (psi + g_tip) + chi_far * mF)
+                + dF * chi_far)
+
+
 def fibonacci_dirs_v4(n):
     return fibonacci_dirs(n)
 
@@ -613,6 +685,10 @@ def make_model(variant, device, hidden_layers=4, hidden_neurons=128,
                                  n_basis=n_basis)
     elif variant == "opv6":
         model = OperatorV6Ansatz(hidden_layers=hidden_layers,
+                                 hidden_neurons=hidden_neurons,
+                                 n_basis=n_basis)
+    elif variant == "opv7":
+        model = OperatorV7Ansatz(hidden_layers=hidden_layers,
                                  hidden_neurons=hidden_neurons,
                                  n_basis=n_basis)
     elif variant == "c2":

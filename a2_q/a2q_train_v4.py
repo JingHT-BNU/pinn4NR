@@ -56,7 +56,7 @@ def main():
     setup_logging("A2", "a2q_train_v4")
     ap = argparse.ArgumentParser()
     ap.add_argument("--variant", required=True,
-                    choices=["opv4", "opv5", "opv6", "c2"])
+                    choices=["opv4", "opv5", "opv6", "opv7", "c2"])
     ap.add_argument("--exp-name", required=True)
     ap.add_argument("--steps", type=int, default=15000)
     ap.add_argument("--lr", type=float, default=1e-4)
@@ -225,7 +225,13 @@ def main():
     if args.init_from:
         src = torch.load(os.path.join(args.init_from, "model.pt"),
                          map_location=device, weights_only=False)
-        model.load_state_dict(src["model_state"])
+        inc = model.load_state_dict(src["model_state"], strict=False)
+        if inc.missing_keys:
+            # opv7 等变体热启动:新通道保持零初始化(初始模型与源等价)
+            log.info("[微调] 新增参数(零初始化): %s", inc.missing_keys)
+        if inc.unexpected_keys:
+            raise RuntimeError("源 checkpoint 有无法载入的多余参数: %s"
+                               % inc.unexpected_keys)
         log.info("[微调] 权重来自 %s (variant=%s, steps=%s)", args.init_from,
                  src.get("variant"), src.get("steps_done"))
     if os.path.exists(ck_p):
